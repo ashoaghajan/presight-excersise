@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // CommonJS output on purpose: the Node server runs the emitted JS directly
+    // (no bundler), while Vite happily pre-bundles CJS for the client. Emitting
+    // one format keeps the package free of dual-package hazards.
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"]
+}

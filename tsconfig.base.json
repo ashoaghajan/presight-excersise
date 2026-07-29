@@ -1,0 +1,30 @@
+// Single source of truth for compiler strictness across every workspace.
+// Each package extends this file and only overrides what is environment
+// specific (module resolution, JSX, lib, outDir).
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+
+    /* Strictness: the exercise explicitly grades type safety, so every
+       optional strictness flag is enabled up front rather than retro-fitted. */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    "forceConsistentCasingInFileNames": true,
+
+    /* Interop / emit hygiene */
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+
+    /* Unused-symbol checks. Switched on now that every layer is implemented —
+       they were off only while the repository was a scaffold of intentionally
+       unused placeholders. */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  }
+}

@@ -1,17 +1,37 @@
 {
   "name": "presight-execise",
   "version": "1.0.0",
+  "private": true,
   "repository": "",
   "author": "",
   "license": "MIT",
   "workspaces": [
+    "shared",
     "client",
     "server"
   ],
   "scripts": {
-    "start": "lerna run start"
+    "build": "lerna run build",
+    "start": "lerna run start",
+    "dev": "lerna run dev --parallel",
+    "typecheck": "lerna run typecheck",
+    "test": "lerna run test",
+    "db:migrate": "yarn workspace presight-server db:migrate",
+    "db:seed": "yarn workspace presight-server db:seed",
+    "db:reset": "yarn workspace presight-server db:reset",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,css,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json,css,md}\"",
+    "e2e": "node e2e/responsive.mjs && node e2e/states.mjs && node e2e/filters.mjs && node e2e/url-state.mjs"
+  },
+  "resolutions": {
+    "@types/node": "~22.20.1",
+    "tinyglobby": "~0.2.17",
+    "vite": "~7.3.6"
   },
   "devDependencies": {
-    "lerna": "~8.2.1"
+    "lerna": "~8.2.1",
+    "playwright": "~1.62.0",
+    "prettier": "~3.5.3",
+    "typescript": "~5.9.3"
   }
 }

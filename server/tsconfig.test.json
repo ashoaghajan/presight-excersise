@@ -1,0 +1,13 @@
+// Type-checks the test sources, which `tsconfig.json` excludes so they stay out
+// of `dist/`. Never emits: `yarn test` runs the TypeScript directly via Vitest.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node", "vitest/globals"],
+    // The config file sits outside `src`, and nothing is emitted here anyway.
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

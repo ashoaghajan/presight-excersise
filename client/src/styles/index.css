@@ -1,0 +1,115 @@
+/**
+ * Global stylesheet and design-token source of truth.
+ *
+ * Tailwind v4 is configured in CSS (no `tailwind.config.js`). The `@theme`
+ * block below turns the palette and spacing scale into real
+ * Tailwind utilities (`bg-surface`, `text-muted`, `border-subtle`, ...), so
+ * components reference *semantic* names instead of hard-coded hex values —
+ * re-theming later touches this file only.
+ */
+
+@import 'tailwindcss';
+
+@theme {
+  /* Colours */
+  --color-canvas: #f8fafc; /* page background */
+  --color-surface: #ffffff; /* card background */
+  --color-primary: #2563eb;
+  --color-subtle: #e2e8f0; /* borders */
+  --color-ink: #0f172a; /* primary text */
+  --color-muted: #64748b; /* secondary text */
+
+  /* Layout */
+  --spacing-sidebar: 280px;
+
+  /* Height of the sticky search/sort header. Shared by the header itself and by
+     the sidebar, which sticks directly beneath it — defining it once stops the
+     two drifting apart and leaving a gap or an overlap. */
+  --header-height: 4.5rem;
+
+  /* Spacing: Tailwind's default 4px step is kept, so the 8px
+     system is expressed as the even steps (2 = 8px, 4 = 16px, 6 = 24px). */
+}
+
+/* Drawer transitions. Applied via Tailwind's `motion-safe:` variant, so they
+   are skipped entirely under `prefers-reduced-motion: reduce`. */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@layer base {
+  html {
+    /* The virtualized list positions rows itself; document-level smooth
+       scrolling fights with the scroll-to-top on filter changes. */
+    scroll-behavior: auto;
+    /* System font stack — no webfont request, and it looks native on each
+       platform, which is most of what "polished" means for an internal tool. */
+    font-family:
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      Roboto,
+      'Helvetica Neue',
+      Arial,
+      sans-serif;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Accessibility: focus must always be visible, including for
+     keyboard users navigating the filter checkboxes. Applied globally rather
+     than per-component so a new control cannot ship without it. */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  /* The mouse-focus ring on click is noise; :focus-visible already covers the
+     keyboard case, which is the one that matters. */
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+}
+
+@layer utilities {
+  /* Sidebar and drawer lists scroll independently; a thin, low-contrast
+     scrollbar keeps them from looking like separate windows. */
+  .scrollbar-slim {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-subtle) transparent;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background-color: var(--color-subtle);
+    border-radius: 3px;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}

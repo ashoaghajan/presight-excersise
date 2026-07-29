@@ -1,0 +1,13 @@
+node_modules
+dist
+build
+coverage
+*.sqlite
+*.sqlite3
+yarn.lock
+package-lock.json
+
+# Provided specification documents — kept byte-for-byte as delivered.
+README.md
+README_IMPLEMENTATION_PLAN.md
+DESIGN_SPEC.md

@@ -8,10 +8,16 @@ node_modules/
 # testing
 /coverage
 
-# production
+# build output
 dist/
 build/
-scripts/
+
+# SQLite database files (recreated by `yarn db:migrate && yarn db:seed`)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+server/data/*
+!server/data/.gitkeep
 
 # misc
 .DS_Store
@@ -29,3 +35,6 @@ yarn-error.log*
 
 .parcel-cache
 .idea/
+
+# Screenshots produced by the e2e harnesses
+e2e/__screenshots__/

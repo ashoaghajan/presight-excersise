@@ -26,7 +26,8 @@ presight-execise/
 │   │   ├── db/             connection + init, migrator, migrations/*.sql, seed/
 │   │   ├── repositories/   SQL only
 │   │   ├── services/       business logic / orchestration
-│   │   ├── routes/         HTTP contract (+ routes/validators/ = trust boundary)
+│   │   ├── routes/         route table: method + path → controller method
+│   │   ├── controllers/    HTTP handling (+ controllers/validators/ = trust boundary)
 │   │   ├── middleware/     cors/logging/404/error envelope
 │   │   ├── lib/            HttpError, logger
 │   │   └── types/          persistence-shaped row types
@@ -109,23 +110,26 @@ to compile. The pin keeps a single copy of each.
 Requests flow strictly downwards, and each layer may only import the one below:
 
 ```
-route  →  service  →  repository  →  SQLite
-  ↑          ↑             ↑
-  │          │             └── SQL lives here, and nowhere else
-  │          └── business rules; knows nothing about Express or SQL
-  └── HTTP contract only: validate → call service → serialise
+route  →  controller  →  service  →  repository  →  SQLite
+  ↑          ↑              ↑             ↑
+  │          │              │             └── SQL lives here, and nowhere else
+  │          │              └── business rules; knows nothing about Express or SQL
+  │          └── HTTP only: parse/validate request → call service → shape response
+  └── maps method + path onto a controller method, nothing else
 ```
 
-| Layer           | Owns                                                          | Must never                                     |
-| --------------- | ------------------------------------------------------------- | ---------------------------------------------- |
-| `routes/`       | URL shape, query validation, status codes, JSON serialisation | contain SQL or business rules                  |
-| `services/`     | orchestration, pagination maths, row → DTO mapping            | import `express` or touch the DB               |
-| `repositories/` | SQL construction, prepared statements, row typing             | know about HTTP or apply defaults              |
-| `db/`           | connection lifecycle, migrations, seeding                     | be imported by services or routes              |
-| `middleware/`   | cross-cutting HTTP concerns                                   | know about users, hobbies or nationalities     |
-| `config/`       | reading and validating `process.env`                          | be bypassed (nothing else reads `process.env`) |
+| Layer           | Owns                                                    | Must never                                     |
+| --------------- | ------------------------------------------------------- | ---------------------------------------------- |
+| `routes/`       | URL shape: which method + path reaches which controller | contain handler logic                          |
+| `controllers/`  | query validation, status codes, JSON serialisation      | contain SQL or business rules                  |
+| `services/`     | orchestration, pagination maths, row → DTO mapping      | import `express` or touch the DB               |
+| `repositories/` | SQL construction, prepared statements, row typing       | know about HTTP or apply defaults              |
+| `db/`           | connection lifecycle, migrations, seeding               | be imported by services or routes              |
+| `middleware/`   | cross-cutting HTTP concerns                             | know about users, hobbies or nationalities     |
+| `config/`       | reading and validating `process.env`                    | be bypassed (nothing else reads `process.env`) |
 
-The payoff is testability: a service can be unit-tested with fake repositories,
+The payoff is testability: a controller can be unit-tested with a fake service,
+a service with fake repositories,
 a repository against an in-memory SQLite database, and the whole app by binding
 it to an ephemeral port — none of them require the others.
 
@@ -311,7 +315,7 @@ production and surfaced in development.
 
 ### 3.7 Validation as a trust boundary
 
-`routes/validators/users.query.ts` is where untrusted query strings become a
+`controllers/validators/users.query.ts` is where untrusted query strings become a
 typed `UsersQuery`. Because validation happens there and only there, the service
 and the repositories may assume valid, normalised, defaulted values and never
 re-check them.

@@ -36,6 +36,9 @@ jobs:
       - name: Lint
         run: yarn lint
 
+      - name: Build shared package
+        run: yarn workspace @presight/shared build
+
       - name: Typecheck
         run: yarn typecheck
 

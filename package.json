@@ -16,6 +16,7 @@
     "dev": "lerna run dev --parallel",
     "typecheck": "lerna run typecheck",
     "test": "lerna run test",
+    "test:coverage": "lerna run test:coverage",
     "db:migrate": "yarn workspace presight-server db:migrate",
     "db:seed": "yarn workspace presight-server db:seed",
     "db:reset": "yarn workspace presight-server db:reset",

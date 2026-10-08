@@ -22,5 +22,22 @@ export default defineConfig({
     globals: true,
     include: ['src/**/*.test.{ts,tsx}'],
     restoreMocks: true,
+    coverage: {
+      provider: 'v8',
+      // `include` makes files no test imports show up as 0% instead of being
+      // silently left out of the report.
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: ['src/**/*.test.{ts,tsx}', 'src/main.tsx', 'src/vite-env.d.ts'],
+      reporter: ['text', 'html', 'json-summary'],
+      reportsDirectory: 'coverage',
+      // A ratchet a few points below today's numbers, not a target: it stops
+      // coverage sliding backwards. Raise it as untested UI gains tests.
+      thresholds: {
+        lines: 65,
+        statements: 63,
+        functions: 58,
+        branches: 62,
+      },
+    },
   },
 });

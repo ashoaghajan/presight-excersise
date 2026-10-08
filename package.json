@@ -16,6 +16,7 @@
     "dev": "lerna run dev --parallel",
     "typecheck": "lerna run typecheck",
     "test": "lerna run test",
+    "test:coverage": "lerna run test:coverage",
     "db:migrate": "yarn workspace presight-server db:migrate",
     "db:seed": "yarn workspace presight-server db:seed",
     "db:reset": "yarn workspace presight-server db:reset",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@eslint/js": "~10.0.1",
+    "@vitest/coverage-v8": "4.1.10",
     "eslint": "~10.12.0",
     "eslint-plugin-react-hooks": "~7.1.1",
     "globals": "~17.13.0",

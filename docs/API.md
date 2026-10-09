@@ -131,11 +131,19 @@ one error-parsing path:
 }
 ```
 
-| Status | `code`           | When                                              |
-| ------ | ---------------- | ------------------------------------------------- |
-| `400`  | `BAD_REQUEST`    | any parameter fails validation                    |
-| `404`  | `NOT_FOUND`      | unknown route                                     |
-| `500`  | `INTERNAL_ERROR` | unexpected failure (message hidden in production) |
+| Status | `code`              | When                                                               |
+| ------ | ------------------- | ------------------------------------------------------------------ |
+| `400`  | `BAD_REQUEST`       | any parameter fails validation, or malformed JSON body             |
+| `404`  | `NOT_FOUND`         | unknown route                                                      |
+| `413`  | `PAYLOAD_TOO_LARGE` | JSON body over `JSON_BODY_LIMIT` (default `10kb`)                  |
+| `429`  | `RATE_LIMITED`      | over `RATE_LIMIT_MAX` requests per IP per window (default 300/min) |
+| `500`  | `INTERNAL_ERROR`    | unexpected failure (message hidden in production)                  |
+
+### Rate limiting
+
+Every `/api` route except `/api/health` is limited per client IP. Responses
+carry the IETF `RateLimit` / `RateLimit-Policy` headers (remaining quota and
+policy), and a `429` also carries `Retry-After` (seconds).
 
 All failing parameters are reported at once:
 

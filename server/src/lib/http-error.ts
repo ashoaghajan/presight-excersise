@@ -23,6 +23,14 @@ export class HttpError extends Error {
     return new HttpError(404, 'NOT_FOUND', message);
   }
 
+  static payloadTooLarge(message = 'Request body is too large'): HttpError {
+    return new HttpError(413, 'PAYLOAD_TOO_LARGE', message);
+  }
+
+  static tooManyRequests(message = 'Too many requests, please retry later'): HttpError {
+    return new HttpError(429, 'RATE_LIMITED', message);
+  }
+
   static internal(message = 'Internal server error'): HttpError {
     return new HttpError(500, 'INTERNAL_ERROR', message);
   }

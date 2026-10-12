@@ -11,15 +11,29 @@ import type { ErrorRequestHandler } from 'express';
 import type { ApiErrorBody } from '@presight/shared';
 
 import { config } from '../config';
-import { isHttpError } from '../lib/http-error';
+import { HttpError, isHttpError } from '../lib/http-error';
 import { logger } from '../lib/logger';
 
+/**
+ * `express.json()` (body-parser) throws its own errors, tagged with `type`.
+ * They are the client's fault, so they map to 4xx — without this an oversized
+ * or malformed body would be reported as a 500.
+ */
+function fromBodyParserError(err: unknown): HttpError | undefined {
+  const type = typeof err === 'object' && err !== null ? (err as { type?: unknown }).type : null;
+  if (type === 'entity.too.large') return HttpError.payloadTooLarge();
+  if (type === 'entity.parse.failed') return HttpError.badRequest('Request body is not valid JSON');
+  return undefined;
+}
+
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
-  if (isHttpError(err)) {
+  const httpError = isHttpError(err) ? err : fromBodyParserError(err);
+
+  if (httpError) {
     const body: ApiErrorBody = {
-      error: { code: err.code, message: err.message, details: err.details },
+      error: { code: httpError.code, message: httpError.message, details: httpError.details },
     };
-    res.status(err.status).json(body);
+    res.status(httpError.status).json(body);
     return;
   }
 

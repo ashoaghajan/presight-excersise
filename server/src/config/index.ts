@@ -22,6 +22,17 @@ const envSchema = z.object({
   /** Comma-separated list of origins allowed to call the API. */
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'silent']).default('info'),
+  /**
+   * Number of reverse proxies in front of the app (nginx in compose = 1).
+   * Express takes the client IP from `X-Forwarded-For` only through that many
+   * hops, so a client cannot spoof its IP and dodge the rate limit.
+   */
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
+  /** Rate limit on `/api`: at most RATE_LIMIT_MAX requests per IP per window. */
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+  /** Largest JSON request body accepted (bytes-style string, e.g. `10kb`). */
+  JSON_BODY_LIMIT: z.string().min(1).default('10kb'),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -45,6 +56,11 @@ export const config = Object.freeze({
   corsOrigins: env.CORS_ORIGIN.split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),
+  security: {
+    trustProxyHops: env.TRUST_PROXY_HOPS,
+    rateLimit: { windowMs: env.RATE_LIMIT_WINDOW_MS, max: env.RATE_LIMIT_MAX },
+    jsonBodyLimit: env.JSON_BODY_LIMIT,
+  },
   db: {
     path: path.isAbsolute(env.DATABASE_PATH)
       ? env.DATABASE_PATH

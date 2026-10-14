@@ -57,7 +57,9 @@ row per (user, hobby), so "has both" is a condition across rows. `search`,
 `nationalities` and `hobbies` all apply together (AND).
 
 `search` is a case-insensitive substring match against `first_name` **or**
-`last_name`. `%` and `_` are matched literally, not as wildcards.
+`last_name`. `%`, `_`, quotes and FTS operators such as `OR` or `*` are matched
+literally, not as syntax. Terms of 3+ characters are served by a full-text index;
+1–2 character terms use a table scan. The results are the same either way.
 
 ### Response `200` — `UsersResponse`
 

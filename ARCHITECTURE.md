@@ -188,6 +188,51 @@ would serve requests against a missing schema never gets as far as listening.
 Seeding is deliberately _not_ part of start-up — inserting demo rows is an
 explicit operator action, not a side effect of booting.
 
+**Full-text search** (`002_users_name_fts.sql`). `LIKE '%term%'` has a leading
+wildcard, so no B-tree can serve it and every search scanned all users. Migration
+002 adds an FTS5 virtual table over `first_name`/`last_name` with the **trigram**
+tokenizer, and the filter asks it for matching ids:
+
+```sql
+u.id IN (SELECT rowid FROM users_fts WHERE users_fts MATCH '"ann"')
+```
+
+- _Trigram, not the default tokenizer._ The search is a substring match ("ann"
+  finds "Hannah"). The default `unicode61` tokenizer matches whole words or word
+  prefixes only, which would quietly change behaviour. Trigram indexes every
+  3-character sequence, so any substring of 3+ characters is an index lookup.
+  Terms of 1–2 characters cannot form a trigram and keep the `LIKE` scan.
+- _The term is one quoted phrase._ Inside quotes, FTS5 operators (`OR`, `NEAR`,
+  `*`, `:`) are plain text, so typing them cannot change the query or cause a
+  syntax error. Without the quotes, a stray `"` in the search box was a 500.
+- _External content + triggers._ `content='users'` stores only the index, not a
+  second copy of the names. SQLite does not sync it automatically, so insert,
+  delete and name-update triggers do. They live in the database rather than the
+  app, so every writer (seeder, scripts, an older app version) keeps the index
+  correct. Tests run FTS5's `integrity-check` after each kind of write.
+- _Expand-only, so rollback is safe._ The migration adds a table and triggers
+  and changes nothing existing code reads. The previous image still works on
+  the migrated database, and its writes still reach the index through the
+  triggers. No down migration and no contract step are needed.
+
+Measured on 100k users (one full request: count + page + both facets; mean of
+20; the facet queries are the remaining cost for common terms):
+
+| Search         | Matches | Before (`LIKE`) |       After (FTS5) |
+| -------------- | ------: | --------------: | -----------------: |
+| `ann`          |     746 |          138 ms |             2.9 ms |
+| `shehri`       |     406 |          118 ms |             2.8 ms |
+| `mar`          |   6,475 |          161 ms |              27 ms |
+| `zzzz` (none)  |       0 |          245 ms |             0.3 ms |
+| `al` (2 chars) |  23,522 |          163 ms | unchanged (`LIKE`) |
+
+The price is paid on writes and disk: seeding 100k users went from ~4.2 s to
+~8.3 s, because each insert now also writes one index entry per trigram of
+both names, and the file grew from 35 MB to 40 MB. The backfill of 100k
+existing rows took ~150 ms inside the migration's transaction. For a read-heavy
+directory that trade is clearly worth it; for a write-heavy table it would need
+measuring.
+
 **Seeding** (`db/seed/`) generates 1200 users across 24 weighted nationalities
 and 44 weighted hobbies, 0–10 hobbies per user. Three properties are deliberate:
 
@@ -820,6 +865,9 @@ assertion would pass whether or not virtualization worked.
 - **`NOCASE` folds ASCII only**, so `Müller` would not match a search for
   `muller`. Nothing in the seed is non-ASCII. The fix, if ever needed, is a
   normalised `search_text` column plus an index — noted in `001_init.sql`.
-- **Substring search cannot use an index.** `LIKE '%term%'` forces a scan; at
-  this size it is sub-millisecond, and FTS5 is the escape hatch if the dataset
-  grows by orders of magnitude.
+- **1–2 character searches still scan.** They are too short for the trigram
+  index and fall back to `LIKE`. They also match the most rows, so the facet
+  queries dominate their cost anyway.
+- **Case folding differs slightly between the two search paths.** `NOCASE`
+  (LIKE path) folds ASCII only; the trigram tokenizer folds Unicode case too.
+  Every seeded name is ASCII, so results are identical today.

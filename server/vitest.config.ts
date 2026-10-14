@@ -33,10 +33,10 @@ export default defineConfig({
       // coverage sliding backwards without rewarding tests written for the
       // number. Raise it as coverage grows.
       thresholds: {
-        lines: 85,
-        statements: 85,
-        functions: 85,
-        branches: 75,
+        lines: 94,
+        statements: 93,
+        functions: 95,
+        branches: 82,
       },
     },
   },

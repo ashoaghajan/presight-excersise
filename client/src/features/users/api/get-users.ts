@@ -14,7 +14,8 @@ import { USERS_PAGE_SIZE } from '../model/list-config';
 import type { UsersQueryState } from '../model/users-query';
 
 export interface GetUsersParams extends UsersQueryState {
-  page: number;
+  /** `nextCursor` from the previous page; `null` for the first page. */
+  cursor: string | null;
   limit?: number;
 }
 
@@ -32,9 +33,10 @@ export async function getUsers(
 ): Promise<UsersResponse> {
   return apiGet<UsersResponse>(API_ENDPOINTS.users, {
     // Empty strings and empty arrays are dropped by the client's param
-    // serializer, so an unfiltered request sends only `page` and `limit`.
+    // serializer (as is a null cursor), so an unfiltered first page sends
+    // only `limit`.
     params: {
-      page: params.page,
+      cursor: params.cursor,
       limit: params.limit ?? USERS_PAGE_SIZE,
       search: params.search,
       hobbies: params.hobbies,

@@ -14,10 +14,10 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { UsersResponse } from '@presight/shared';
+import { SORT_DIRECTIONS, SORT_FIELDS, type UsersResponse } from '@presight/shared';
 
 import { createApp } from '../app';
-import { createTestContext, expectedUsers, type TestContext } from '../test/fixture';
+import { createTestContext, expectedOrder, expectedUsers, type TestContext } from '../test/fixture';
 
 let ctx: TestContext;
 let server: Server;
@@ -116,28 +116,71 @@ describe('GET /api/users', () => {
     expect(both.body.pagination.total).toBe(filtered.body.pagination.total + second.count);
   });
 
-  it('follows hasMore to exactly the end, with no duplicates or gaps', async () => {
+  /** Follows `nextCursor` from the first page to the last, like the client. */
+  async function walkApi(qs: string): Promise<{ ids: number[]; pages: number }> {
     const ids: number[] = [];
-    let page = 1;
+    let cursor: string | null = null;
     let pages = 0;
 
-    for (;;) {
-      const { body } = await getUsers(`?limit=37&page=${page}&sortField=nationality`);
+    do {
+      const { status, body }: { status: number; body: UsersResponse } = await getUsers(
+        `${qs}${cursor ? `&cursor=${cursor}` : ''}`,
+      );
+      expect(status).toBe(200);
       ids.push(...body.users.map((user) => user.id));
       pages++;
-      if (!body.pagination.hasMore) break;
-      page++;
-    }
+      expect(body.pagination.hasMore).toBe(body.pagination.nextCursor !== null);
+      cursor = body.pagination.nextCursor;
+    } while (cursor);
 
-    expect(new Set(ids).size).toBe(ids.length);
-    expect(ids.length).toBe(ctx.oracle.length);
-    expect(pages).toBe(Math.ceil(ctx.oracle.length / 37));
+    return { ids, pages };
+  }
+
+  it('follows nextCursor to exactly the end, in order, for every sort', async () => {
+    for (const sortField of SORT_FIELDS) {
+      for (const sortDirection of SORT_DIRECTIONS) {
+        const { ids, pages } = await walkApi(
+          `?limit=37&sortField=${sortField}&sortDirection=${sortDirection}`,
+        );
+        const label = `${sortField} ${sortDirection}`;
+
+        expect(ids, label).toEqual(
+          expectedOrder(ctx.oracle, sortField, sortDirection).map((user) => user.id),
+        );
+        expect(pages, label).toBe(Math.ceil(ctx.oracle.length / 37));
+      }
+    }
+  });
+
+  it('walks a filtered and searched set exactly', async () => {
+    const nationality = ctx.oracle[0]!.nationality;
+    const { ids } = await walkApi(
+      `?limit=5&search=a&nationalities=${encodeURIComponent(nationality)}&sortField=age`,
+    );
+    const expected = expectedOrder(
+      expectedUsers(ctx.oracle, { search: 'a', nationalities: [nationality] }),
+      'age',
+      'asc',
+    );
+
+    expect(ids).toEqual(expected.map((user) => user.id));
+  });
+
+  it('ends on an exactly full last page without an extra empty request', async () => {
+    // 300 rows at 100 per page: page 3 is full, and the probe row is what
+    // tells the server there is nothing after it.
+    expect(ctx.oracle.length % 100).toBe(0);
+    const { ids, pages } = await walkApi('?limit=100');
+
+    expect(pages).toBe(ctx.oracle.length / 100);
+    expect(ids).toHaveLength(ctx.oracle.length);
   });
 
   it('returns an identical payload for an identical request', async () => {
-    const qs = '?sortField=age&sortDirection=desc&limit=20&page=2';
-    const [first, second] = await Promise.all([getUsers(qs), getUsers(qs)]);
-    expect(JSON.stringify(second.body)).toBe(JSON.stringify(first.body));
+    const first = await getUsers('?sortField=age&sortDirection=desc&limit=20');
+    const qs = `?sortField=age&sortDirection=desc&limit=20&cursor=${first.body.pagination.nextCursor}`;
+    const [a, b] = await Promise.all([getUsers(qs), getUsers(qs)]);
+    expect(JSON.stringify(b.body)).toBe(JSON.stringify(a.body));
   });
 });
 
@@ -149,6 +192,28 @@ describe('error handling', () => {
     expect(response.status).toBe(400);
     expect(body.error.code).toBe('BAD_REQUEST');
     expect(body.error.details).toHaveProperty('sortField');
+  });
+
+  it('rejects a tampered cursor with a 400 on the cursor field', async () => {
+    const response = await fetch(`${baseUrl}/api/users?cursor=not-a-real-cursor`);
+    const body = (await response.json()) as { error: { details?: unknown } };
+
+    expect(response.status).toBe(400);
+    expect(body.error.details).toHaveProperty('cursor');
+  });
+
+  it('rejects a cursor reused with a different sort', async () => {
+    const { body } = await getUsers('?sortField=age&limit=10');
+    const response = await fetch(
+      `${baseUrl}/api/users?sortField=last_name&cursor=${body.pagination.nextCursor}`,
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it('rejects the retired page parameter', async () => {
+    const response = await fetch(`${baseUrl}/api/users?page=2`);
+    expect(response.status).toBe(400);
   });
 
   it('funnels unmatched routes into the same envelope', async () => {

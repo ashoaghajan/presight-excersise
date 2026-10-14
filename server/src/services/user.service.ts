@@ -4,7 +4,7 @@
  * Responsibilities:
  *  - decide *what* the endpoint means: one page of users AND the facet counts
  *    for the same filtered set, in a single consistent snapshot
- *  - derive `PaginationMeta` (totalPages / hasMore) from the repository's count
+ *  - derive `PaginationMeta` (total, hasMore, nextCursor) for the page
  *  - map persistence rows (`UserWithHobbies`) onto the wire contract (`UserDto`)
  *
  * It deliberately knows nothing about Express (no req/res) and nothing about
@@ -19,6 +19,7 @@ import {
   type UsersResponse,
 } from '@presight/shared';
 
+import { encodeCursor } from '../lib/cursor';
 import type { FacetRepository, UserRepository } from '../repositories';
 import type { UserWithHobbies } from '../types/domain';
 
@@ -56,21 +57,33 @@ function toUserDto(row: UserWithHobbies): UserDto {
 }
 
 /**
- * Derives the pagination envelope.
+ * Derives the pagination envelope from a "limit + 1" fetch.
  *
- * `hasMore` is computed from the total rather than from "did we get a full
- * page", because a page that happens to land exactly on the last row would
- * otherwise report `true` and the client would fetch an empty page before
- * stopping.
+ * `hasMore` comes from whether the extra row exists, not from the total. With
+ * a cursor there is no page number to compare the total against, and the
+ * total is a separate query that can disagree with the page if a row was
+ * written in between. The probe row answers "is there anything after this
+ * page?" exactly and costs one row.
  */
-function buildPaginationMeta(query: UsersQuery, total: number): PaginationMeta {
-  return {
-    page: query.page,
-    limit: query.limit,
-    total,
-    totalPages: Math.ceil(total / query.limit),
-    hasMore: query.page * query.limit < total,
-  };
+function buildPage(
+  query: UsersQuery,
+  fetched: UserWithHobbies[],
+  total: number,
+): { rows: UserWithHobbies[]; pagination: PaginationMeta } {
+  const hasMore = fetched.length > query.limit;
+  const rows = hasMore ? fetched.slice(0, query.limit) : fetched;
+  const last = rows.at(-1);
+
+  const nextCursor =
+    hasMore && last
+      ? encodeCursor({
+          sortField: query.sortField,
+          sortDirection: query.sortDirection,
+          position: { value: last[query.sortField], id: last.id },
+        })
+      : null;
+
+  return { rows, pagination: { limit: query.limit, total, hasMore, nextCursor } };
 }
 
 /** Dependencies are injected rather than imported: no hidden global wiring. */
@@ -85,13 +98,16 @@ export function createUserService(deps: UserServiceDeps): UserService {
       // is synchronous, so these run back-to-back on one connection with no
       // interleaving writer — the snapshot is consistent by construction.
       const total = userRepository.countUsers(query);
-      const users = userRepository.searchUsers(query);
+      // One extra row as a probe for `hasMore`; it is never returned.
+      const fetched = userRepository.searchUsers({ ...query, limit: query.limit + 1 });
       const hobbies = facetRepository.getTopHobbies(query, FACET_LIMIT);
       const nationalities = facetRepository.getTopNationalities(query, FACET_LIMIT);
 
+      const { rows, pagination } = buildPage(query, fetched, total);
+
       return {
-        users: users.map(toUserDto),
-        pagination: buildPaginationMeta(query, total),
+        users: rows.map(toUserDto),
+        pagination,
         hobbies,
         nationalities,
       };

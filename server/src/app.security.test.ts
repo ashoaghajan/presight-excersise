@@ -18,7 +18,7 @@ import type { UserService } from './services';
 const fakeUserService: UserService = {
   getUsers: (): UsersResponse => ({
     users: [],
-    pagination: { page: 1, limit: 50, total: 0, totalPages: 0, hasMore: false },
+    pagination: { limit: 50, total: 0, hasMore: false, nextCursor: null },
     hobbies: [],
     nationalities: [],
   }),

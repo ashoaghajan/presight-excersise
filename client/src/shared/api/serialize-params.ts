@@ -15,7 +15,7 @@
  * `hobbies=a&hobbies=b`.
  *
  * Empty values are dropped rather than sent blank: an unfiltered request should
- * be `?page=1&limit=50`, not a URL carrying seven empty parameters. `URLSearchParams`
+ * be `?limit=50`, not a URL carrying seven empty parameters. `URLSearchParams`
  * handles percent-encoding, so values containing spaces or `&` are safe.
  */
 export function serializeParams(params: Record<string, unknown>): string {

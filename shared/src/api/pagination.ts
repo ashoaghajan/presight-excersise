@@ -20,6 +20,17 @@ export interface PaginationMeta {
   hasMore: boolean;
 }
 
+/**
+ * A position in an ordered result: the sort value and `id` of the last row
+ * already returned. "Next page" means rows strictly after this one in
+ * `ORDER BY <sortField> <direction>, id ASC`.
+ */
+export interface KeysetPosition {
+  /** The row's value for the active sort field (a number for `age`). */
+  value: string | number;
+  id: number;
+}
+
 export const DEFAULT_PAGE = 1;
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 100;

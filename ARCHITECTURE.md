@@ -281,6 +281,62 @@ Measured on the seeded 1200 rows with all three filters active: `searchUsers`
 (`repositories/statement-cache.ts`) because the SQL shape is generated per
 request but repeats constantly while a user scrolls.
 
+### 3.4.1 Query plan audit
+
+Every repository query was run through `EXPLAIN QUERY PLAN` on the default
+seed (1,200 users) and on `db:seed --users=100000` (407k hobby links). The
+plans were **identical at both sizes**, so the numbers below show how each plan
+scales rather than a different plan being chosen. Timings are the mean of 20
+runs of a prepared statement (better-sqlite3, Apple Silicon laptop).
+
+How to read the plan: `SCAN` visits every row of a table or index; `SEARCH`
+seeks into a B-tree and reads only a key range; `COVERING INDEX` means the
+index alone answers the query and the table is never read; `USE TEMP B-TREE`
+means SQLite sorted or grouped rows itself because no index produced them in
+the needed order.
+
+| #   | Query                                 | Plan                                                                                                                        | 1.2k     | 100k    |
+| --- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------- | ------- |
+| 1   | Page, no filter, `first_name ASC`     | `SCAN u USING INDEX idx_users_first_name`                                                                                   | 0.03 ms  | 0.03 ms |
+| 1b  | Same, `OFFSET` at 90 % of the table   | same plan                                                                                                                   | 0.04 ms  | 1.08 ms |
+| 2   | Page, no filter, `age DESC`           | `SCAN … idx_users_age` + `TEMP B-TREE FOR RIGHT PART OF ORDER BY`                                                           | 0.04 ms  | 0.18 ms |
+| 3   | Page, search `ann`, `last_name ASC`   | `SCAN u USING INDEX idx_users_last_name` (LIKE checked per row)                                                             | 0.27 ms  | 9.4 ms  |
+| 4   | Page, `nationality IN (2)`, `age ASC` | `SEARCH … idx_users_nationality (nationality=?)` + `TEMP B-TREE FOR ORDER BY`                                               | 0.09 ms  | 2.8 ms  |
+| 5   | Page, hobbies `Reading AND Swimming`  | `LIST SUBQUERY` (covering index seeks, temp B-trees for GROUP BY/DISTINCT), then rowid lookups + `TEMP B-TREE FOR ORDER BY` | 0.15 ms  | 10.9 ms |
+| 6   | `COUNT(*)`, no filter                 | `SCAN u USING COVERING INDEX idx_users_age`                                                                                 | <0.01 ms | 0.02 ms |
+| 7   | `COUNT(*)`, search `ann`              | `SCAN u` (full table)                                                                                                       | 0.14 ms  | 11.8 ms |
+| 8   | `loadHobbies` for one page            | `SEARCH uh USING COVERING INDEX (user_id=?)` + PK lookup on `hobbies`                                                       | 0.13 ms  | 0.15 ms |
+| 9   | Top nationalities, no filter          | `SCAN u USING COVERING INDEX idx_users_nationality` + `TEMP B-TREE FOR ORDER BY`                                            | 0.05 ms  | 3.6 ms  |
+| 10  | Top hobbies, no filter                | `SCAN h` → `SEARCH uh (hobby_id=?)` → `SEARCH u (rowid=?)` + temp B-trees for `count(DISTINCT)` and ORDER BY                | 0.90 ms  | 125 ms  |
+
+**Findings.**
+
+- **Q1 `SCAN` is not a problem.** The index is already in `ORDER BY` order, so
+  SQLite reads it from the start and stops after `LIMIT` rows. A SCAN with a
+  LIMIT and no sort step is the best plan for an unfiltered page.
+- **`OFFSET` is linear (Q1b).** The same plan gets ~36× slower deep in the
+  list, because SQLite still walks and discards every skipped row. This is the
+  case for keyset (cursor) pagination.
+- **`DESC` adds a sort on the tie-breaker (Q2).** Walking `(age, id)` backwards
+  gives `id DESC` inside a tie group, but we ask for `id ASC`. The temp B-tree
+  only re-sorts within each run of equal ages, so it stays cheap.
+- **Substring search can't use an index (Q3, Q7).** `LIKE '%ann%'` has a leading
+  wildcard, so no B-tree prefix exists to seek on: every row is tested. The page
+  query (Q3) can stop once it has 50 matches; the count (Q7) cannot, and runs
+  on every request. This is the case for FTS5.
+- **Filter + sort on different columns needs a sort (Q4, Q5).** The filter picks
+  rows through one index, but the order comes from another column, so all
+  matching rows are sorted before `LIMIT` applies.
+- **Q8 (`loadHobbies`) is the N+1 fix working.** One query for the whole page,
+  both sides served by index seeks, so it costs the same at 1.2k and 100k.
+- **The facets are the real cost (Q10).** Top hobbies runs on _every_ request
+  and touches all 407k link rows. Two measured improvements, not yet applied:
+  `COUNT(*)` instead of `COUNT(DISTINCT u.id)` (safe because the primary key on
+  `user_hobbies` makes each (user, hobby) pair unique) brings it to 89 ms, and
+  skipping the `users` join when no user-level filter is active brings it to
+  15 ms. Caching facet counts per filter, or computing them only on the first
+  page, would remove most of the cost. Keyset pagination does not help here.
+
 ### 3.5 The API surface
 
 A single endpoint, `GET /api/users`, returns the page **and** the facet counts.

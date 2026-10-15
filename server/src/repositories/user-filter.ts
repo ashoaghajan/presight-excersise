@@ -51,6 +51,23 @@ function escapeLikeWildcards(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `\\${char}`);
 }
 
+/** The trigram tokenizer indexes 3-character sequences; shorter terms cannot use it. */
+const TRIGRAM_LENGTH = 3;
+
+/**
+ * Wraps the search term as one FTS5 phrase.
+ *
+ * Inside double quotes FTS5 treats everything as literal text: `AND`, `OR`,
+ * `NEAR`, `*`, `:` and parentheses lose their query-syntax meaning, so a user
+ * typing them cannot change the query's structure or cause a syntax error.
+ * The only character with meaning inside the quotes is `"` itself, escaped by
+ * doubling. The phrase is still bound with `?`; this escaping is about FTS5's
+ * own query language, not SQL injection.
+ */
+function toFtsPhrase(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
 /**
  * Removes blanks and case-insensitive duplicates.
  *
@@ -97,15 +114,27 @@ export function buildUserFilter(
 
   // --- Search: first_name OR last_name -------------------------------------
   //
-  // Substring match, so "ann" finds both "Ananya" and "Hannah". The columns are
-  // declared COLLATE NOCASE, so this is already case-insensitive without
-  // LOWER() — which matters, because wrapping a column in a function is exactly
-  // what stops an index from being usable.
+  // Substring match, so "ann" finds both "Ananya" and "Hannah", case-
+  // insensitively. Two implementations with the same result:
+  //
+  //  - 3+ characters: the FTS5 trigram index from migration 002. The term is
+  //    sent as one quoted phrase, which under the trigram tokenizer means
+  //    "this exact sequence of characters, anywhere in first_name or
+  //    last_name". The index returns the matching ids and SQLite fetches those
+  //    rows by primary key, instead of testing every row.
+  //  - 1–2 characters: too short to form a trigram, so the index cannot answer
+  //    it. Falls back to LIKE, which scans. The columns are COLLATE NOCASE, so
+  //    no LOWER() is needed (a function on a column would block an index).
   const search = query.search.trim();
   if (search !== '' && includes('search')) {
-    conditions.push(`(u.first_name LIKE ? ESCAPE '\\' OR u.last_name LIKE ? ESCAPE '\\')`);
-    const pattern = `%${escapeLikeWildcards(search)}%`;
-    params.push(pattern, pattern);
+    if ([...search].length >= TRIGRAM_LENGTH) {
+      conditions.push(`u.id IN (SELECT rowid FROM users_fts WHERE users_fts MATCH ?)`);
+      params.push(toFtsPhrase(search));
+    } else {
+      conditions.push(`(u.first_name LIKE ? ESCAPE '\\' OR u.last_name LIKE ? ESCAPE '\\')`);
+      const pattern = `%${escapeLikeWildcards(search)}%`;
+      params.push(pattern, pattern);
+    }
   }
 
   // --- Nationalities: OR ---------------------------------------------------

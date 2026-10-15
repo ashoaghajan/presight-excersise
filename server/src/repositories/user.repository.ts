@@ -5,11 +5,18 @@
  *  - translate a validated `UsersQuery` into a parameterised SQL statement
  *  - apply search (first_name / last_name), nationality OR-filter and hobby
  *    AND-filter — all via `buildUserFilter`, never re-derived here
- *  - apply `ORDER BY <sortField> <direction>, id ASC` and LIMIT/OFFSET
+ *  - apply `ORDER BY <sortField> <direction>, id ASC`, the keyset cursor
+ *    ("rows after this one") and LIMIT
  *  - return persistence-shaped rows; no DTO shaping, no HTTP concerns
  */
 
-import { SORT_DIRECTIONS, SORT_FIELDS, type SortDirection, type SortField } from '@presight/shared';
+import {
+  SORT_DIRECTIONS,
+  SORT_FIELDS,
+  type KeysetPosition,
+  type SortDirection,
+  type SortField,
+} from '@presight/shared';
 import type { UsersQuery } from '@presight/shared';
 
 import { getDb } from '../db';
@@ -20,7 +27,7 @@ import { createStatementCache } from './statement-cache';
 export interface UserRepository {
   /** One page of users matching the query, ordered deterministically. */
   searchUsers(query: UsersQuery): UserWithHobbies[];
-  /** Total users matching the same filters, ignoring page/limit. */
+  /** Total users matching the same filters, ignoring cursor/limit. */
   countUsers(query: UsersQuery): number;
 }
 
@@ -46,18 +53,55 @@ const SORT_COLUMNS: Record<SortField, string> = {
  * `u.id ASC` is appended unconditionally. Without it, rows with equal sort
  * values are free to come back in any order, and two requests for consecutive
  * pages can return the same user twice — or skip one entirely — while the user
- * is scrolling. The tie-breaker is what makes offset pagination safe.
+ * is scrolling. It also makes `(sortValue, id)` unique, which is what lets a
+ * keyset cursor name an exact position.
  *
  * The sort columns are declared COLLATE NOCASE in the schema, so ordering is
  * case-insensitive without a per-query COLLATE.
  */
-function buildOrderBy(field: SortField, direction: SortDirection): string {
+function sortColumn(field: SortField): string {
   // Defensive re-validation: these values are typed, but they are also the one
   // thing in this file that reaches the SQL text, so cheap paranoia is worth it.
-  const column = SORT_FIELDS.includes(field) ? SORT_COLUMNS[field] : SORT_COLUMNS.first_name;
-  const order = SORT_DIRECTIONS.includes(direction) && direction === 'desc' ? 'DESC' : 'ASC';
+  return SORT_FIELDS.includes(field) ? SORT_COLUMNS[field] : SORT_COLUMNS.first_name;
+}
 
-  return `ORDER BY ${column} ${order}, u.id ASC`;
+function isDescending(direction: SortDirection): boolean {
+  return SORT_DIRECTIONS.includes(direction) && direction === 'desc';
+}
+
+function buildOrderBy(field: SortField, direction: SortDirection): string {
+  return `ORDER BY ${sortColumn(field)} ${isDescending(direction) ? 'DESC' : 'ASC'}, u.id ASC`;
+}
+
+/**
+ * "Rows strictly after `after`" in the order `buildOrderBy` produces.
+ *
+ * For `ORDER BY col ASC, id ASC` the rows after (v, i) are those with
+ * `col > v`, or `col = v AND id > i`. For DESC the column comparison flips but
+ * the id comparison does not, because the tie-breaker stays ascending. That
+ * mixed direction is why SQLite's row-value form `(col, id) > (?, ?)` cannot
+ * be used here.
+ *
+ * It is written as `col >= v AND (col > v OR id > i)` rather than the plain
+ * OR: the two are equivalent, but the leading `col >= v` is a range condition
+ * SQLite can SEEK to in the `(col, id)` index. A top-level OR would make it
+ * scan from the start of the index, which is the OFFSET cost all over again.
+ *
+ * The comparison inherits the column's NOCASE collation, so it agrees with
+ * the ORDER BY on what "after" means.
+ */
+function buildKeysetCondition(
+  field: SortField,
+  direction: SortDirection,
+  after: KeysetPosition,
+): { sql: string; params: (string | number)[] } {
+  const column = sortColumn(field);
+  const [orEqual, strictly] = isDescending(direction) ? ['<=', '<'] : ['>=', '>'];
+
+  return {
+    sql: `${column} ${orEqual} ? AND (${column} ${strictly} ? OR u.id > ?)`,
+    params: [after.value, after.value, after.id],
+  };
 }
 
 /**
@@ -106,23 +150,24 @@ export function createUserRepository(db = getDb()): UserRepository {
     searchUsers(query: UsersQuery): UserWithHobbies[] {
       const filter = buildUserFilter(query);
       const orderBy = buildOrderBy(query.sortField, query.sortDirection);
+      const keyset = query.after
+        ? buildKeysetCondition(query.sortField, query.sortDirection, query.after)
+        : null;
 
-      // Page is 1-based; a defensive floor keeps a bad page number from
-      // producing a negative OFFSET, which SQLite would reject outright.
       const limit = Math.max(1, query.limit);
-      const offset = Math.max(0, (Math.max(1, query.page) - 1) * limit);
 
       const rows = statements
         .prepare<UserRow>(
           `SELECT u.id, u.avatar, u.first_name, u.last_name, u.age, u.nationality
              FROM users u
             WHERE ${filter.sql}
+              ${keyset ? `AND ${keyset.sql}` : ''}
             ${orderBy}
-            LIMIT ? OFFSET ?`,
+            LIMIT ?`,
         )
-        // Filter parameters first, then the trailing LIMIT/OFFSET — the order
-        // has to match the placeholder order in the SQL above.
-        .all(...filter.params, limit, offset);
+        // Filter parameters first, then the cursor, then LIMIT — the order has
+        // to match the placeholder order in the SQL above.
+        .all(...filter.params, ...(keyset?.params ?? []), limit);
 
       const hobbiesByUser = loadHobbies(rows.map((row) => row.id));
 

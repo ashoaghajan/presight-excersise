@@ -4,12 +4,13 @@
  * Uses fake repositories rather than a database — the point of the layering is
  * that this logic can be tested without one, and the boundary cases below
  * (`hasMore` at the exact end of the last page) are far easier to state with
- * hand-chosen totals.
+ * hand-chosen rows.
  */
 
 import { describe, expect, it, vi } from 'vitest';
 import { FACET_LIMIT, type UsersQuery } from '@presight/shared';
 
+import { decodeCursor } from '../lib/cursor';
 import { createUserService } from './user.service';
 import type { FacetRepository, UserRepository } from '../repositories';
 import type { UserWithHobbies } from '../types/domain';
@@ -45,46 +46,52 @@ function createService(total: number, rows: UserWithHobbies[] = []) {
 }
 
 describe('pagination metadata', () => {
-  // `hasMore` is derived from the total rather than from "was the page full",
-  // so a page landing exactly on the last row reports false instead of costing
-  // the client an empty round trip. Stated as explicit expectations rather than
-  // a formula, so a wrong formula cannot agree with itself.
-  const cases: Array<{
-    label: string;
-    page: number;
-    limit: number;
-    total: number;
-    hasMore: boolean;
-    totalPages: number;
-  }> = [
-    { label: 'first of many', page: 1, limit: 10, total: 95, hasMore: true, totalPages: 10 },
-    { label: 'second to last', page: 9, limit: 10, total: 95, hasMore: true, totalPages: 10 },
-    {
-      label: 'exact last (partial)',
-      page: 10,
-      limit: 10,
-      total: 95,
-      hasMore: false,
-      totalPages: 10,
-    },
-    {
-      label: 'exact last (full page)',
-      page: 10,
-      limit: 10,
-      total: 100,
-      hasMore: false,
-      totalPages: 10,
-    },
-    { label: 'past the end', page: 11, limit: 10, total: 95, hasMore: false, totalPages: 10 },
-    { label: 'limit of one', page: 3, limit: 1, total: 5, hasMore: true, totalPages: 5 },
-    { label: 'empty result set', page: 1, limit: 10, total: 0, hasMore: false, totalPages: 0 },
-  ];
+  // The service asks the repository for `limit + 1` rows. The extra row is a
+  // probe: if it exists there is a next page. These cases pin the boundaries
+  // where a wrong comparison (>= vs >) would show up.
+  const users = (count: number) => Array.from({ length: count }, (_, i) => fakeUser(i + 1));
 
-  it.each(cases)('$label', ({ page, limit, total, hasMore, totalPages }) => {
-    const { service } = createService(total);
-    const result = service.getUsers(query({ page, limit }));
+  it('asks the repository for one row more than the page size', () => {
+    const { service, userRepository } = createService(100, users(11));
+    service.getUsers(query({ limit: 10 }));
+    expect(userRepository.searchUsers).toHaveBeenCalledWith(expect.objectContaining({ limit: 11 }));
+  });
 
-    expect(result.pagination).toEqual({ page, limit, total, totalPages, hasMore });
+  it.each([
+    { label: 'probe row present', fetched: 11, returned: 10, hasMore: true },
+    { label: 'exactly a full page', fetched: 10, returned: 10, hasMore: false },
+    { label: 'partial last page', fetched: 4, returned: 4, hasMore: false },
+    { label: 'empty result set', fetched: 0, returned: 0, hasMore: false },
+  ])('$label', ({ fetched, returned, hasMore }) => {
+    const { service } = createService(95, users(fetched));
+    const result = service.getUsers(query({ limit: 10 }));
+
+    expect(result.users).toHaveLength(returned);
+    expect(result.pagination.hasMore).toBe(hasMore);
+    expect(result.pagination.nextCursor !== null).toBe(hasMore);
+    expect(result.pagination).toMatchObject({ limit: 10, total: 95 });
+  });
+
+  it('points the cursor at the last returned row, not at the probe row', () => {
+    const rows = users(11).map((user, i) => ({ ...user, age: 20 + i }));
+    const { service } = createService(100, rows);
+
+    const { pagination } = service.getUsers(
+      query({ limit: 10, sortField: 'age', sortDirection: 'desc' }),
+    );
+
+    expect(decodeCursor(pagination.nextCursor!)).toEqual({
+      sortField: 'age',
+      sortDirection: 'desc',
+      position: { value: 29, id: 10 },
+    });
+  });
+
+  it('stores the value of the active sort field in the cursor', () => {
+    const { service } = createService(100, users(3));
+    const { pagination } = service.getUsers(query({ limit: 2, sortField: 'last_name' }));
+
+    expect(decodeCursor(pagination.nextCursor!)?.position).toEqual({ value: 'Last2', id: 2 });
   });
 });
 
@@ -102,7 +109,8 @@ describe('response assembly', () => {
     service.getUsers(q);
 
     expect(userRepository.countUsers).toHaveBeenCalledWith(q);
-    expect(userRepository.searchUsers).toHaveBeenCalledWith(q);
+    // Same filters and sort; only the limit grows by the probe row.
+    expect(userRepository.searchUsers).toHaveBeenCalledWith({ ...q, limit: q.limit + 1 });
     expect(facetRepository.getTopHobbies).toHaveBeenCalledWith(q, FACET_LIMIT);
     expect(facetRepository.getTopNationalities).toHaveBeenCalledWith(q, FACET_LIMIT);
   });

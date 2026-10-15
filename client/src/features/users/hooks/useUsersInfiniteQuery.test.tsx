@@ -42,7 +42,7 @@ function makeResponse(overrides: Partial<UsersResponse> = {}): UsersResponse {
         hobbies: ['Reading'],
       },
     ],
-    pagination: { page: 1, limit: 50, total: 1, totalPages: 1, hasMore: false },
+    pagination: { limit: 50, total: 1, hasMore: false, nextCursor: null },
     hobbies: [{ value: 'Reading', count: 1 }],
     nationalities: [{ value: 'United Kingdom', count: 1 }],
     ...overrides,
@@ -95,15 +95,48 @@ describe('success', () => {
     expect(result.current.users).toBe(first);
   });
 
-  it('reports hasNextPage from the server flag', async () => {
+  it('reports hasNextPage from the server cursor', async () => {
     vi.spyOn(getUsersModule, 'getUsers').mockResolvedValue(
       makeResponse({
-        pagination: { page: 1, limit: 50, total: 100, totalPages: 2, hasMore: true },
+        pagination: { limit: 50, total: 100, hasMore: true, nextCursor: 'c1' },
       }),
     );
 
     const { result } = renderHook(() => useUsersInfiniteQuery(state), { wrapper });
     await waitFor(() => expect(result.current.hasNextPage).toBe(true));
+  });
+
+  it('reports no next page when the server returns no cursor', async () => {
+    vi.spyOn(getUsersModule, 'getUsers').mockResolvedValue(makeResponse());
+
+    const { result } = renderHook(() => useUsersInfiniteQuery(state), { wrapper });
+    await waitFor(() => expect(result.current.isInitialLoading).toBe(false));
+    expect(result.current.hasNextPage).toBe(false);
+  });
+
+  it('starts without a cursor and hands back the one the server issued', async () => {
+    const spy = vi
+      .spyOn(getUsersModule, 'getUsers')
+      .mockResolvedValueOnce(
+        makeResponse({ pagination: { limit: 50, total: 2, hasMore: true, nextCursor: 'c1' } }),
+      )
+      .mockResolvedValueOnce(
+        makeResponse({
+          users: [{ ...makeResponse().users[0]!, id: 2 }],
+          pagination: { limit: 50, total: 2, hasMore: false, nextCursor: null },
+        }),
+      );
+
+    const { result } = renderHook(() => useUsersInfiniteQuery(state), { wrapper });
+    await waitFor(() => expect(result.current.hasNextPage).toBe(true));
+
+    result.current.fetchNextPage();
+    await waitFor(() => expect(result.current.users).toHaveLength(2));
+
+    expect(spy.mock.calls[0]![0]).toMatchObject({ cursor: null });
+    expect(spy.mock.calls[1]![0]).toMatchObject({ cursor: 'c1' });
+    expect(result.current.users.map((user) => user.id)).toEqual([1, 2]);
+    expect(result.current.hasNextPage).toBe(false);
   });
 });
 

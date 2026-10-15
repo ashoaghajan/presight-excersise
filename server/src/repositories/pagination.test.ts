@@ -17,6 +17,7 @@ import {
   expectedOrder,
   expectedUsers,
   query,
+  walkIds,
   type TestContext,
 } from '../test/fixture';
 
@@ -28,19 +29,9 @@ beforeAll(() => {
 
 afterAll(() => ctx.close());
 
-/** Walks every page for a query and returns the ids in the order received. */
+/** Walks every page of a query with keyset cursors, as the API does. */
 function walk(overrides: Parameters<typeof query>[0], limit: number): number[] {
-  const ids: number[] = [];
-  const total = ctx.userRepository.countUsers(query({ ...overrides, limit }));
-
-  for (let page = 1; ; page++) {
-    const rows = ctx.userRepository.searchUsers(query({ ...overrides, limit, page }));
-    if (rows.length === 0) break;
-    ids.push(...rows.map((row) => row.id));
-    if (ids.length >= total) break;
-  }
-
-  return ids;
+  return walkIds(ctx.userRepository, overrides, limit);
 }
 
 describe('sorting', () => {
@@ -79,7 +70,12 @@ describe('sorting', () => {
   });
 
   it('is stable across identical requests', () => {
-    const q = query({ sortField: 'nationality', sortDirection: 'desc', limit: 25, page: 3 });
+    const q = query({
+      sortField: 'nationality',
+      sortDirection: 'desc',
+      limit: 25,
+      after: { value: 'India', id: 50 },
+    });
     const first = ctx.userRepository.searchUsers(q).map((row) => row.id);
     const second = ctx.userRepository.searchUsers(q).map((row) => row.id);
     expect(second).toEqual(first);
@@ -121,16 +117,136 @@ describe('pagination', () => {
     }
   });
 
-  it('returns an empty page past the end without disturbing the total', () => {
-    const q = query({ page: 999, limit: 50 });
+  it('returns an empty page after the last row without disturbing the total', () => {
+    const last = expectedOrder(ctx.oracle, 'first_name', 'asc').at(-1)!;
+    const q = query({ after: { value: last.first_name, id: last.id } });
+
     expect(ctx.userRepository.searchUsers(q)).toEqual([]);
     expect(ctx.userRepository.countUsers(q)).toBe(ctx.oracle.length);
   });
 
-  it('counts independently of paging', () => {
-    // countUsers must ignore page/limit entirely — if it ever applied them the
-    // UI would report the page size as the result count.
-    const base = ctx.userRepository.countUsers(query({ page: 1, limit: 10 }));
-    expect(ctx.userRepository.countUsers(query({ page: 4, limit: 100 }))).toBe(base);
+  it('counts independently of the cursor and limit', () => {
+    // countUsers must ignore cursor/limit entirely — if it ever applied them
+    // the UI would report "rows left" or the page size as the result count.
+    const base = ctx.userRepository.countUsers(query({ limit: 10 }));
+    expect(ctx.userRepository.countUsers(query({ limit: 100, after: { value: 'M', id: 1 } }))).toBe(
+      base,
+    );
+  });
+
+  it('starts strictly after the cursor row, inside a tie group too', () => {
+    // Nationality has the largest tie groups. Starting in the middle of one
+    // checks the `id > ?` half of the keyset condition.
+    const order = expectedOrder(ctx.oracle, 'nationality', 'desc');
+    const index = order.findIndex(
+      (user, i) => i > 0 && user.nationality === order[i - 1]!.nationality,
+    );
+    const cursorRow = order[index]!;
+
+    const rows = ctx.userRepository.searchUsers(
+      query({
+        sortField: 'nationality',
+        sortDirection: 'desc',
+        limit: 10,
+        after: { value: cursorRow.nationality, id: cursorRow.id },
+      }),
+    );
+
+    expect(rows.map((row) => row.id)).toEqual(
+      order.slice(index + 1, index + 11).map((user) => user.id),
+    );
+  });
+});
+
+describe('pagination while the data changes', () => {
+  // The real reason for keyset pagination. With OFFSET, page N means "skip
+  // N * limit rows *as the table is now*", so a row inserted before the
+  // current position pushes an already-seen row onto the next page (a
+  // duplicate), and a deleted row pulls an unseen one back (a gap). A cursor
+  // means "after this exact row", which other writes cannot move.
+  //
+  // Each test gets its own database because it writes to it.
+
+  const insertUser = (c: TestContext, firstName: string): number =>
+    Number(
+      c.db
+        .prepare(
+          `INSERT INTO users (avatar, first_name, last_name, age, nationality)
+           VALUES ('a.svg', ?, 'Inserted', 30, 'Testland')`,
+        )
+        .run(firstName).lastInsertRowid,
+    );
+
+  it('shows no duplicates and skips nothing when rows are inserted mid-scroll', () => {
+    const c = createTestContext();
+    try {
+      const original = expectedOrder(c.oracle, 'first_name', 'asc').map((user) => user.id);
+      let before = 0;
+      let after = 0;
+
+      const ids = walkIds(c.userRepository, { sortField: 'first_name' }, 20, (pageIndex) => {
+        if (pageIndex !== 3) return;
+        // One row sorting before everything already seen, one after
+        // everything. Under OFFSET the first would shift the window and
+        // repeat a row on the next page.
+        before = insertUser(c, 'Aaaaa');
+        after = insertUser(c, 'Zzzzz');
+      });
+
+      expect(new Set(ids).size, 'duplicates').toBe(ids.length);
+      expect(
+        ids.filter((id) => id !== after),
+        'original rows, in order',
+      ).toEqual(original);
+      expect(ids).not.toContain(before); // sorts before the cursor: correctly not shown
+      expect(ids.at(-1)).toBe(after); // sorts after the cursor: shown, at the end
+    } finally {
+      c.close();
+    }
+  });
+
+  it('skips nothing when an already-seen row is deleted mid-scroll', () => {
+    const c = createTestContext();
+    try {
+      const original = expectedOrder(c.oracle, 'age', 'desc').map((user) => user.id);
+
+      const ids = walkIds(
+        c.userRepository,
+        { sortField: 'age', sortDirection: 'desc' },
+        20,
+        (pageIndex) => {
+          // Delete a row from page 1. Under OFFSET every later row would move
+          // up by one and the first row of the next page would never be shown.
+          if (pageIndex === 2) c.db.prepare('DELETE FROM users WHERE id = ?').run(original[5]);
+        },
+      );
+
+      expect(ids).toEqual(original);
+    } finally {
+      c.close();
+    }
+  });
+
+  it('documents the OFFSET bug the cursor fixes', () => {
+    // Not testing our code: a reference showing what the old implementation
+    // did in the scenario above, so the tests explain *why* cursors exist.
+    const c = createTestContext();
+    try {
+      const page = (offset: number) =>
+        c.db
+          .prepare<[number], { id: number }>(
+            'SELECT id FROM users ORDER BY first_name, id LIMIT 20 OFFSET ?',
+          )
+          .all(offset)
+          .map((row) => row.id);
+
+      const first = page(0);
+      insertUser(c, 'Aaaaa');
+      const second = page(20);
+
+      expect(second[0]).toBe(first.at(-1)); // the last row of page 1, shown again
+    } finally {
+      c.close();
+    }
   });
 });

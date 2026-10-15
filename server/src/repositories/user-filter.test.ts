@@ -13,6 +13,7 @@ import {
   createTestContext,
   expectedUsers,
   query,
+  walkIds,
   type OracleUser,
   type TestContext,
 } from '../test/fixture';
@@ -27,17 +28,7 @@ afterAll(() => ctx.close());
 
 /** Ids the repository returns for a query, unpaginated. */
 function actualIds(overrides: Parameters<typeof query>[0]): number[] {
-  const q = query({ ...overrides, limit: 100, page: 1 });
-  const total = ctx.userRepository.countUsers(q);
-  const ids: number[] = [];
-
-  for (let page = 1; ids.length < total; page++) {
-    const rows = ctx.userRepository.searchUsers(query({ ...overrides, limit: 100, page }));
-    if (rows.length === 0) break;
-    ids.push(...rows.map((row) => row.id));
-  }
-
-  return ids.sort((a, b) => a - b);
+  return walkIds(ctx.userRepository, overrides, 100).sort((a, b) => a - b);
 }
 
 function expectedIds(users: OracleUser[]): number[] {

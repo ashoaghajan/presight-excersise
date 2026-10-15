@@ -10,20 +10,20 @@
 import type { NextFunction, Request, Response } from 'express';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  DEFAULT_PAGE,
   DEFAULT_PAGE_SIZE,
   DEFAULT_SORT_DIRECTION,
   DEFAULT_SORT_FIELD,
   type UsersResponse,
 } from '@presight/shared';
 
+import { encodeCursor } from '../lib/cursor';
 import { HttpError } from '../lib/http-error';
 import type { UserService } from '../services';
 import { createUsersController } from './users.controller';
 
 const RESPONSE: UsersResponse = {
   users: [],
-  pagination: { page: 1, limit: 50, total: 0, totalPages: 0, hasMore: false },
+  pagination: { limit: 50, total: 0, hasMore: false, nextCursor: null },
   hobbies: [],
   nationalities: [],
 };
@@ -54,7 +54,7 @@ describe('usersController.list', () => {
     list({});
 
     expect(userService.getUsers).toHaveBeenCalledWith({
-      page: DEFAULT_PAGE,
+      after: null,
       limit: DEFAULT_PAGE_SIZE,
       search: '',
       hobbies: [],
@@ -67,11 +67,17 @@ describe('usersController.list', () => {
   it('turns raw query-string values into typed values', () => {
     const { userService, list } = setup();
 
-    list({ page: '2', limit: '10', search: '  ann ', hobbies: 'Chess,Golf', sortField: 'age' });
+    const cursor = encodeCursor({
+      sortField: 'age',
+      sortDirection: 'asc',
+      position: { value: 30, id: 7 },
+    });
+
+    list({ cursor, limit: '10', search: '  ann ', hobbies: 'Chess,Golf', sortField: 'age' });
 
     expect(userService.getUsers).toHaveBeenCalledWith(
       expect.objectContaining({
-        page: 2,
+        after: { value: 30, id: 7 },
         limit: 10,
         search: 'ann',
         hobbies: ['Chess', 'Golf'],

@@ -217,7 +217,7 @@ export function expectedFacets(
 /** Builds a full `UsersQuery` so tests only state what they care about. */
 export function query(overrides: Partial<UsersQuery> = {}): UsersQuery {
   return {
-    page: 1,
+    after: null,
     limit: 50,
     search: '',
     hobbies: [],
@@ -226,4 +226,33 @@ export function query(overrides: Partial<UsersQuery> = {}): UsersQuery {
     sortDirection: 'asc',
     ...overrides,
   };
+}
+
+/**
+ * Walks every page of a query through the repository the way the API does:
+ * each next request starts after the last row of the previous one.
+ *
+ * `beforePage` runs before each page after the first, so tests can write to
+ * the database mid-scroll. Returns ids in the order received.
+ */
+export function walkIds(
+  userRepository: UserRepository,
+  overrides: Partial<UsersQuery> | undefined,
+  limit: number,
+  beforePage?: (pageIndex: number) => void,
+): number[] {
+  const base = query({ ...overrides, limit });
+  const ids: number[] = [];
+  let after: UsersQuery['after'] = null;
+
+  for (let pageIndex = 0; ; pageIndex++) {
+    if (pageIndex > 0) beforePage?.(pageIndex);
+
+    const rows = userRepository.searchUsers({ ...base, after });
+    ids.push(...rows.map((row) => row.id));
+    if (rows.length < limit) return ids;
+
+    const last = rows.at(-1)!;
+    after = { value: last[base.sortField], id: last.id };
+  }
 }

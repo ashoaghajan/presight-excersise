@@ -188,6 +188,51 @@ would serve requests against a missing schema never gets as far as listening.
 Seeding is deliberately _not_ part of start-up — inserting demo rows is an
 explicit operator action, not a side effect of booting.
 
+**Full-text search** (`002_users_name_fts.sql`). `LIKE '%term%'` has a leading
+wildcard, so no B-tree can serve it and every search scanned all users. Migration
+002 adds an FTS5 virtual table over `first_name`/`last_name` with the **trigram**
+tokenizer, and the filter asks it for matching ids:
+
+```sql
+u.id IN (SELECT rowid FROM users_fts WHERE users_fts MATCH '"ann"')
+```
+
+- _Trigram, not the default tokenizer._ The search is a substring match ("ann"
+  finds "Hannah"). The default `unicode61` tokenizer matches whole words or word
+  prefixes only, which would quietly change behaviour. Trigram indexes every
+  3-character sequence, so any substring of 3+ characters is an index lookup.
+  Terms of 1–2 characters cannot form a trigram and keep the `LIKE` scan.
+- _The term is one quoted phrase._ Inside quotes, FTS5 operators (`OR`, `NEAR`,
+  `*`, `:`) are plain text, so typing them cannot change the query or cause a
+  syntax error. Without the quotes, a stray `"` in the search box was a 500.
+- _External content + triggers._ `content='users'` stores only the index, not a
+  second copy of the names. SQLite does not sync it automatically, so insert,
+  delete and name-update triggers do. They live in the database rather than the
+  app, so every writer (seeder, scripts, an older app version) keeps the index
+  correct. Tests run FTS5's `integrity-check` after each kind of write.
+- _Expand-only, so rollback is safe._ The migration adds a table and triggers
+  and changes nothing existing code reads. The previous image still works on
+  the migrated database, and its writes still reach the index through the
+  triggers. No down migration and no contract step are needed.
+
+Measured on 100k users (one full request: count + page + both facets; mean of
+20; the facet queries are the remaining cost for common terms):
+
+| Search         | Matches | Before (`LIKE`) |       After (FTS5) |
+| -------------- | ------: | --------------: | -----------------: |
+| `ann`          |     746 |          138 ms |             2.9 ms |
+| `shehri`       |     406 |          118 ms |             2.8 ms |
+| `mar`          |   6,475 |          161 ms |              27 ms |
+| `zzzz` (none)  |       0 |          245 ms |             0.3 ms |
+| `al` (2 chars) |  23,522 |          163 ms | unchanged (`LIKE`) |
+
+The price is paid on writes and disk: seeding 100k users went from ~4.2 s to
+~8.3 s, because each insert now also writes one index entry per trigram of
+both names, and the file grew from 35 MB to 40 MB. The backfill of 100k
+existing rows took ~150 ms inside the migration's transaction. For a read-heavy
+directory that trade is clearly worth it; for a write-heavy table it would need
+measuring.
+
 **Seeding** (`db/seed/`) generates 1200 users across 24 weighted nationalities
 and 44 weighted hobbies, 0–10 hobbies per user. Three properties are deliberate:
 
@@ -259,7 +304,7 @@ u.id IN (SELECT uh.user_id FROM user_hobbies uh JOIN hobbies h ON h.id = uh.hobb
 
 Written as a subquery rather than N correlated `EXISTS` clauses so that it is
 evaluated once, and — more importantly — so the outer query stays a plain row
-filter with **no GROUP BY**. That is what lets `ORDER BY`/`LIMIT`/`OFFSET` keep
+filter with **no GROUP BY**. That is what lets `ORDER BY`/`LIMIT` and the cursor keep
 using the sort indexes, and what lets the identical predicate drop unchanged into
 the two facet queries.
 
@@ -281,6 +326,62 @@ Measured on the seeded 1200 rows with all three filters active: `searchUsers`
 (`repositories/statement-cache.ts`) because the SQL shape is generated per
 request but repeats constantly while a user scrolls.
 
+### 3.4.1 Query plan audit
+
+Every repository query was run through `EXPLAIN QUERY PLAN` on the default
+seed (1,200 users) and on `db:seed --users=100000` (407k hobby links). The
+plans were **identical at both sizes**, so the numbers below show how each plan
+scales rather than a different plan being chosen. Timings are the mean of 20
+runs of a prepared statement (better-sqlite3, Apple Silicon laptop).
+
+How to read the plan: `SCAN` visits every row of a table or index; `SEARCH`
+seeks into a B-tree and reads only a key range; `COVERING INDEX` means the
+index alone answers the query and the table is never read; `USE TEMP B-TREE`
+means SQLite sorted or grouped rows itself because no index produced them in
+the needed order.
+
+| #   | Query                                 | Plan                                                                                                                        | 1.2k     | 100k    |
+| --- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------- | ------- |
+| 1   | Page, no filter, `first_name ASC`     | `SCAN u USING INDEX idx_users_first_name`                                                                                   | 0.03 ms  | 0.03 ms |
+| 1b  | Same, `OFFSET` at 90 % of the table   | same plan                                                                                                                   | 0.04 ms  | 1.08 ms |
+| 2   | Page, no filter, `age DESC`           | `SCAN … idx_users_age` + `TEMP B-TREE FOR RIGHT PART OF ORDER BY`                                                           | 0.04 ms  | 0.18 ms |
+| 3   | Page, search `ann`, `last_name ASC`   | `SCAN u USING INDEX idx_users_last_name` (LIKE checked per row)                                                             | 0.27 ms  | 9.4 ms  |
+| 4   | Page, `nationality IN (2)`, `age ASC` | `SEARCH … idx_users_nationality (nationality=?)` + `TEMP B-TREE FOR ORDER BY`                                               | 0.09 ms  | 2.8 ms  |
+| 5   | Page, hobbies `Reading AND Swimming`  | `LIST SUBQUERY` (covering index seeks, temp B-trees for GROUP BY/DISTINCT), then rowid lookups + `TEMP B-TREE FOR ORDER BY` | 0.15 ms  | 10.9 ms |
+| 6   | `COUNT(*)`, no filter                 | `SCAN u USING COVERING INDEX idx_users_age`                                                                                 | <0.01 ms | 0.02 ms |
+| 7   | `COUNT(*)`, search `ann`              | `SCAN u` (full table)                                                                                                       | 0.14 ms  | 11.8 ms |
+| 8   | `loadHobbies` for one page            | `SEARCH uh USING COVERING INDEX (user_id=?)` + PK lookup on `hobbies`                                                       | 0.13 ms  | 0.15 ms |
+| 9   | Top nationalities, no filter          | `SCAN u USING COVERING INDEX idx_users_nationality` + `TEMP B-TREE FOR ORDER BY`                                            | 0.05 ms  | 3.6 ms  |
+| 10  | Top hobbies, no filter                | `SCAN h` → `SEARCH uh (hobby_id=?)` → `SEARCH u (rowid=?)` + temp B-trees for `count(DISTINCT)` and ORDER BY                | 0.90 ms  | 125 ms  |
+
+**Findings.**
+
+- **Q1 `SCAN` is not a problem.** The index is already in `ORDER BY` order, so
+  SQLite reads it from the start and stops after `LIMIT` rows. A SCAN with a
+  LIMIT and no sort step is the best plan for an unfiltered page.
+- **`OFFSET` is linear (Q1b).** The same plan gets ~36× slower deep in the
+  list, because SQLite still walks and discards every skipped row. This is the
+  case for keyset (cursor) pagination.
+- **`DESC` adds a sort on the tie-breaker (Q2).** Walking `(age, id)` backwards
+  gives `id DESC` inside a tie group, but we ask for `id ASC`. The temp B-tree
+  only re-sorts within each run of equal ages, so it stays cheap.
+- **Substring search can't use an index (Q3, Q7).** `LIKE '%ann%'` has a leading
+  wildcard, so no B-tree prefix exists to seek on: every row is tested. The page
+  query (Q3) can stop once it has 50 matches; the count (Q7) cannot, and runs
+  on every request. This is the case for FTS5.
+- **Filter + sort on different columns needs a sort (Q4, Q5).** The filter picks
+  rows through one index, but the order comes from another column, so all
+  matching rows are sorted before `LIMIT` applies.
+- **Q8 (`loadHobbies`) is the N+1 fix working.** One query for the whole page,
+  both sides served by index seeks, so it costs the same at 1.2k and 100k.
+- **The facets are the real cost (Q10).** Top hobbies runs on _every_ request
+  and touches all 407k link rows. Two measured improvements, not yet applied:
+  `COUNT(*)` instead of `COUNT(DISTINCT u.id)` (safe because the primary key on
+  `user_hobbies` makes each (user, hobby) pair unique) brings it to 89 ms, and
+  skipping the `users` join when no user-level filter is active brings it to
+  15 ms. Caching facet counts per filter, or computing them only on the first
+  page, would remove most of the cost. Keyset pagination does not help here.
+
 ### 3.5 The API surface
 
 A single endpoint, `GET /api/users`, returns the page **and** the facet counts.
@@ -288,12 +389,40 @@ They are not split into two endpoints because both must describe the same
 filtered set — separate requests can interleave and leave the sidebar showing
 counts that contradict the visible rows.
 
-Offset pagination (`page`/`limit`) is used rather than cursors: the list is
-re-sorted on demand by arbitrary columns, and with the mandatory `id`
-tie-breaker offsets stay free of duplicates and gaps while keeping "load next
-page" trivial on the client. `hasMore` is derived from `total` rather than from
-"was the page full", so a page landing exactly on the last row reports `false`
-instead of costing the client one empty round trip to discover the end.
+**Keyset (cursor) pagination.** The response carries an opaque `nextCursor`;
+the client sends it back as `?cursor=` and gets the rows that sort after the
+last row it already has. The cursor is base64url JSON
+`{ v, f: sortField, d: direction, k: sortValue, id }` (`server/src/lib/cursor.ts`).
+The controller decodes it at the trust boundary, so a tampered cursor or one
+issued for a different sort is a `400`, and the repository turns it into
+
+```sql
+-- ORDER BY col ASC, id ASC                -- ORDER BY col DESC, id ASC
+col >= ? AND (col > ? OR u.id > ?)         col <= ? AND (col < ? OR u.id > ?)
+```
+
+The `id` comparison stays `>` in both directions because the tie-breaker is
+always ascending, which is also why SQLite's row-value form `(col, id) > (?, ?)`
+cannot be used. The leading `col >= ?` is not redundant: it is a range the
+planner can seek to in the `(col, id)` index. Measured at 100k users, the same
+deep position costs 0.08 ms in this form and 1.4 ms written as a plain OR,
+against 2.0 ms for the `OFFSET` it replaces and 0.07 ms for the first page.
+
+This replaced `page`/`OFFSET` pagination for two reasons. First, `OFFSET` reads
+and discards every skipped row, so cost grows with depth (§3.4.1). Second, it is
+only correct while the data is static: a row inserted before the reader's
+position pushes an already-seen row onto the next page (a duplicate), and a
+delete pulls an unseen one back (a gap). A cursor names an exact row, so other
+writes cannot move it. The costs are that there is no "jump to page N" and no
+`totalPages`, and that a cursor is only valid for the sort it was issued under;
+an infinite-scroll list needs neither.
+
+`hasMore` is decided by fetching `limit + 1` rows: the extra row is a probe that
+is never returned. It is exact even when the last page is exactly full, and it
+does not depend on `total`, which is a separate query. `total` is still computed
+for the result count. The retired `page` parameter is rejected with a `400`
+rather than ignored, so a browser tab running the old client fails visibly
+instead of re-reading page 1 forever.
 
 The response is `{ users, pagination, hobbies, nationalities }`. The two facet
 arrays are named for what the sidebar renders; they are counts over the current
@@ -329,7 +458,7 @@ request with three bad parameters reports all three at once.
 Every bound is enforced here rather than downstream: `limit` ≤ `MAX_PAGE_SIZE`
 (an unbounded limit is a trivial DoS against a virtualized list), ≤ 50 values per
 filter (each becomes a bound parameter in an `IN (…)` list), ≤ 100 search
-characters, and `page` ≤ 1e6 (offsets grow linearly). Sort parameters are checked
+characters, and an encoded `cursor` ≤ 512 characters. Sort parameters are checked
 against `SORT_FIELDS`/`SORT_DIRECTIONS` from `@presight/shared` — the same
 constants the repository's ORDER BY lookup and the client's sort control use, so
 the three cannot disagree.
@@ -421,8 +550,8 @@ half-typed words.
 
 Two deliberate details:
 
-- `page` is **not** in the URL. The list is an infinite scroll, so the page
-  cursor belongs to the query cache. Sharing a link should reopen the same
+- The pagination cursor is **not** in the URL. The list is an infinite scroll,
+  so the cursor belongs to the query cache. Sharing a link should reopen the same
   filters, not drop the recipient at row 400.
 - **The search box owns its own value** (`hooks/useSearchInput.ts`) and writes
   to the URL on a debounce. Binding the input straight to URL state looks
@@ -473,9 +602,10 @@ entries and invalidation that silently misses one. Filter arrays are sorted into
 a canonical order inside the key, so selecting Reading-then-Swimming hits the
 same cache entry as the reverse — the API returns identical results for both.
 
-`getNextPageParam` trusts the server's `hasMore`, which is derived from `total`
-rather than from "was the page full", so the client never fetches a trailing
-empty page just to discover the end.
+The page param is the server's opaque cursor: `initialPageParam` is `null` and
+`getNextPageParam` returns `nextCursor ?? undefined`. The client never builds or
+parses a cursor. The server issues one only when a row exists beyond the page,
+so the client never fetches a trailing empty page just to discover the end.
 
 **Axios, not `fetch`.** All network access goes through
 `shared/api/http-client.ts` — the only module in the client that knows HTTP
@@ -765,14 +895,14 @@ repository layer. Comparing one SQL query against another only re-confirms the
 same assumptions; comparing SQL against a from-scratch reimplementation is what
 catches a semantic error. Coverage:
 
-| Area                | What is asserted                                                                                                         |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Filter semantics    | every single hobby, all pairs of the ten most common, sampled triples, every nationality, and the three filters composed |
-| Sorting, pagination | exhaustive walks compared **element for element** against the oracle's sorted id list, in both directions                |
-| Facet counts        | value, count and ordering across eight filter states                                                                     |
-| Pagination envelope | `hasMore`/`totalPages` boundary cases, with fake repositories                                                            |
-| Validation          | the accept/reject policy at the trust boundary                                                                           |
-| HTTP                | the real Express app end to end, on an ephemeral port                                                                    |
+| Area                | What is asserted                                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Filter semantics    | every single hobby, all pairs of the ten most common, sampled triples, every nationality, and the three filters composed                   |
+| Sorting, pagination | exhaustive cursor walks compared **element for element** against the oracle, every sort in both directions; inserts and deletes mid-scroll |
+| Facet counts        | value, count and ordering across eight filter states                                                                                       |
+| Pagination envelope | `limit + 1` probe boundaries and the cursor's position, with fake repositories                                                             |
+| Validation          | the accept/reject policy at the trust boundary                                                                                             |
+| HTTP                | the real Express app end to end, on an ephemeral port                                                                                      |
 
 **Client** — Vitest + Testing Library (`yarn test`), 141 specs covering the URL
 codec, history semantics, the search-input binding, the filter panel, the
@@ -812,14 +942,15 @@ assertion would pass whether or not virtualization worked.
 - **`shared/ui` is thin.** The repeated button and badge styles are still inline
   Tailwind. Worth extracting now that the usage patterns have settled; doing it
   earlier would have meant guessing at the abstraction.
-- **Offset pagination is stable only while the dataset is static**, which this
-  read-only directory is. Rows inserted or deleted mid-scroll would shift
-  offsets and could duplicate or skip a user across pages. Keyset pagination is
-  the standard fix, but it cannot express arbitrary re-sorting as cheaply, and
-  the trade is not worth making here.
+- **Cursor pagination has no random access.** There is no "jump to page N";
+  a paged table UI would need `OFFSET` back, or a different design (for
+  example, a search instead of page 40).
 - **`NOCASE` folds ASCII only**, so `Müller` would not match a search for
   `muller`. Nothing in the seed is non-ASCII. The fix, if ever needed, is a
   normalised `search_text` column plus an index — noted in `001_init.sql`.
-- **Substring search cannot use an index.** `LIKE '%term%'` forces a scan; at
-  this size it is sub-millisecond, and FTS5 is the escape hatch if the dataset
-  grows by orders of magnitude.
+- **1–2 character searches still scan.** They are too short for the trigram
+  index and fall back to `LIKE`. They also match the most rows, so the facet
+  queries dominate their cost anyway.
+- **Case folding differs slightly between the two search paths.** `NOCASE`
+  (LIKE path) folds ASCII only; the trigram tokenizer folds Unicode case too.
+  Every seeded name is ASCII, so results are identical today.

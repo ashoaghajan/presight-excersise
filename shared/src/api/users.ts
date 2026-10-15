@@ -8,7 +8,7 @@
  */
 
 import type { FacetCount } from './facets';
-import type { PaginationMeta } from './pagination';
+import type { KeysetPosition, PaginationMeta } from './pagination';
 import type { SortDirection, SortField } from '../sorting';
 
 /** A single user as exposed over the wire. */
@@ -32,7 +32,12 @@ export interface UserDto {
  *  - `hobbies`      — AND  (user has every selected hobby)
  */
 export interface UsersQuery {
-  page: number;
+  /**
+   * Decoded `?cursor=`: return rows after this position. `null` = first page.
+   * The controller has already checked it belongs to `sortField` /
+   * `sortDirection`, so the repository can use it as-is.
+   */
+  after: KeysetPosition | null;
   limit: number;
   /** Free-text match against first_name / last_name. Empty string = no search. */
   search: string;
@@ -48,7 +53,8 @@ export interface UsersQuery {
  * `UsersQuery`. Kept here so the client can build URLs from the same key names.
  */
 export interface UsersQueryParams {
-  page?: string;
+  /** Opaque `nextCursor` from the previous response. */
+  cursor?: string;
   limit?: string;
   search?: string;
   /** Repeatable: `?hobbies=Reading&hobbies=Swimming`. */
@@ -61,7 +67,7 @@ export interface UsersQueryParams {
 
 /** Canonical query-string keys, shared with the client's URL-state hook. */
 export const USERS_QUERY_KEYS = {
-  page: 'page',
+  cursor: 'cursor',
   limit: 'limit',
   search: 'search',
   hobbies: 'hobbies',
@@ -84,11 +90,11 @@ export const MAX_FILTER_VALUES = 50;
 export const MAX_SEARCH_LENGTH = 100;
 
 /**
- * Highest accepted `page`. Offsets grow linearly with it, so an arbitrarily
- * large page number is another cheap way to make the database do pointless
- * work. Far beyond any real dataset here.
+ * Upper bound on the encoded cursor. A real one is well under 200 characters;
+ * the cap stops a client from making the server base64-decode and JSON-parse
+ * an arbitrarily large string.
  */
-export const MAX_PAGE = 1_000_000;
+export const MAX_CURSOR_LENGTH = 512;
 
 export interface UsersResponse {
   /** The requested page of users. */

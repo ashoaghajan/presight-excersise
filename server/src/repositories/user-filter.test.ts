@@ -13,6 +13,7 @@ import {
   createTestContext,
   expectedUsers,
   query,
+  walkIds,
   type OracleUser,
   type TestContext,
 } from '../test/fixture';
@@ -27,17 +28,7 @@ afterAll(() => ctx.close());
 
 /** Ids the repository returns for a query, unpaginated. */
 function actualIds(overrides: Parameters<typeof query>[0]): number[] {
-  const q = query({ ...overrides, limit: 100, page: 1 });
-  const total = ctx.userRepository.countUsers(q);
-  const ids: number[] = [];
-
-  for (let page = 1; ids.length < total; page++) {
-    const rows = ctx.userRepository.searchUsers(query({ ...overrides, limit: 100, page }));
-    if (rows.length === 0) break;
-    ids.push(...rows.map((row) => row.id));
-  }
-
-  return ids.sort((a, b) => a - b);
+  return walkIds(ctx.userRepository, overrides, 100).sort((a, b) => a - b);
 }
 
 function expectedIds(users: OracleUser[]): number[] {
@@ -87,6 +78,61 @@ describe('search', () => {
     expect(ctx.userRepository.countUsers(query({ search: '%' }))).toBe(0);
     expect(ctx.userRepository.countUsers(query({ search: '_' }))).toBe(0);
     expect(ctx.userRepository.countUsers(query({ search: '%a%' }))).toBe(0);
+  });
+
+  it('gives the same results through the FTS index (3+ chars) as the oracle', () => {
+    // Every 3- and 4-character substring of a sample of names, plus whole
+    // names, plus a term spanning the space inside a two-word name. This is
+    // the FTS5 trigram path; 1–2 character terms above use LIKE.
+    const terms = new Set<string>();
+    for (const user of ctx.oracle.slice(0, 15)) {
+      for (const name of [user.first_name, user.last_name]) {
+        terms.add(name);
+        for (let i = 0; i + 3 <= name.length; i++) {
+          terms.add(name.slice(i, i + 3));
+          if (i + 4 <= name.length) terms.add(name.slice(i, i + 4));
+        }
+      }
+    }
+    const twoWord = ctx.oracle.find((user) => user.last_name.includes(' '));
+    if (twoWord) terms.add(twoWord.last_name.slice(0, twoWord.last_name.indexOf(' ') + 2));
+
+    expect(terms.size).toBeGreaterThan(50);
+    for (const term of terms) {
+      expect(actualIds({ search: term }), `search=${term}`).toEqual(
+        expectedIds(expectedUsers(ctx.oracle, { search: term })),
+      );
+    }
+  });
+
+  it('agrees across the LIKE / FTS boundary (2 vs 3 characters)', () => {
+    const name = ctx.oracle[0]!.first_name;
+    for (const term of [name.slice(0, 2), name.slice(0, 3), name.slice(-2), name.slice(-3)]) {
+      expect(actualIds({ search: term }), `search=${term}`).toEqual(
+        expectedIds(expectedUsers(ctx.oracle, { search: term })),
+      );
+    }
+  });
+
+  it('treats FTS5 query syntax as literal text', () => {
+    // Inside a quoted FTS5 phrase, operators lose their meaning. Without the
+    // quoting, `ann OR bob` would widen the search and `an*` would become a
+    // prefix query; a stray quote or parenthesis would be a syntax error (500).
+    const name = ctx.oracle[0]!.first_name;
+    for (const term of [
+      `${name} OR x`,
+      `${name.slice(0, 3)}*`,
+      'NEAR(a b)',
+      'first_name:ann',
+      '"',
+      '""',
+      '(((',
+      `${name.slice(0, 2)}"${name.slice(2, 4)}`,
+    ]) {
+      expect(ctx.userRepository.countUsers(query({ search: term })), `search=${term}`).toBe(
+        expectedUsers(ctx.oracle, { search: term }).length,
+      );
+    }
   });
 
   it('ignores surrounding whitespace', () => {
@@ -218,7 +264,7 @@ describe('filters compose', () => {
     const nationalities = topValues('nationalities', 3);
     const hobbies = topValues('hobbies', 3);
 
-    for (const search of ['', 'a', 'an']) {
+    for (const search of ['', 'a', 'an', 'ann']) {
       for (const nationality of nationalities) {
         for (const hobby of hobbies) {
           const combo = {

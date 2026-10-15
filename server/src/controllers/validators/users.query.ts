@@ -15,12 +15,11 @@
  */
 
 import {
-  DEFAULT_PAGE,
   DEFAULT_PAGE_SIZE,
   DEFAULT_SORT_DIRECTION,
   DEFAULT_SORT_FIELD,
+  MAX_CURSOR_LENGTH,
   MAX_FILTER_VALUES,
-  MAX_PAGE,
   MAX_PAGE_SIZE,
   MAX_SEARCH_LENGTH,
   SORT_DIRECTIONS,
@@ -33,6 +32,7 @@ import {
 } from '@presight/shared';
 import { z } from 'zod';
 
+import { decodeCursor, type Cursor } from '../../lib/cursor';
 import { HttpError } from '../../lib/http-error';
 
 /**
@@ -40,7 +40,7 @@ import { HttpError } from '../../lib/http-error';
  *
  * The regex is deliberate: `Number('')` is 0 and `Number(' 12 ')` is 12, so
  * coercing first and validating after would quietly accept junk. Matching the
- * digits explicitly means `page=1.5`, `page=-1` and `page=abc` all fail with
+ * digits explicitly means `limit=1.5`, `limit=-1` and `limit=abc` all fail with
  * the same clear message instead of three different surprises.
  */
 function integerParam(min: number, max: number) {
@@ -117,11 +117,37 @@ const sortDirectionParam = z
   );
 
 /**
+ * The opaque `nextCursor` from a previous response, decoded here so that a
+ * tampered or truncated cursor is a 400 at the trust boundary rather than a
+ * confusing failure deeper down.
+ */
+const cursorParam = z
+  .string()
+  .max(MAX_CURSOR_LENGTH, `must be at most ${MAX_CURSOR_LENGTH} characters`)
+  .transform((raw, ctx): Cursor => {
+    const cursor = decodeCursor(raw);
+    if (!cursor) {
+      ctx.addIssue({ code: 'custom', message: 'is not a valid cursor' });
+      return z.NEVER;
+    }
+    return cursor;
+  });
+
+/**
  * Unknown query keys are stripped rather than rejected — cache-busting params
  * and analytics tags are not the client's fault and should not fail a request.
+ *
+ * `page` is the exception. It was the pagination parameter before cursors;
+ * ignoring it would make an old client (a tab opened before a deploy) receive
+ * the first page again for every "next page" and show duplicates. Rejecting
+ * it turns that into a visible error the user can fix by reloading.
  */
 const usersQuerySchema = z.object({
-  page: integerParam(1, MAX_PAGE).optional(),
+  page: z
+    .unknown()
+    .refine((value) => value === undefined, 'is no longer supported; use cursor')
+    .optional(),
+  cursor: cursorParam.optional(),
   limit: integerParam(1, MAX_PAGE_SIZE).optional(),
   search: z
     .string()
@@ -152,14 +178,28 @@ export function parseUsersQuery(params: unknown): UsersQuery {
   }
 
   const parsed = result.data;
+  const sortField = parsed.sortField ?? DEFAULT_SORT_FIELD;
+  const sortDirection = parsed.sortDirection ?? DEFAULT_SORT_DIRECTION;
+
+  // A cursor is a position *within one ordering*. Applying one issued for
+  // `age desc` to a `first_name asc` request would return a page that looks
+  // valid but starts at an arbitrary row, so it is a client error.
+  if (
+    parsed.cursor &&
+    (parsed.cursor.sortField !== sortField || parsed.cursor.sortDirection !== sortDirection)
+  ) {
+    throw HttpError.badRequest('Invalid query parameters', {
+      cursor: ['does not match sortField / sortDirection; restart from the first page'],
+    });
+  }
 
   return {
-    page: parsed.page ?? DEFAULT_PAGE,
+    after: parsed.cursor?.position ?? null,
     limit: parsed.limit ?? DEFAULT_PAGE_SIZE,
     search: parsed.search?.trim() ?? '',
     hobbies: parsed.hobbies ?? [],
     nationalities: parsed.nationalities ?? [],
-    sortField: parsed.sortField ?? DEFAULT_SORT_FIELD,
-    sortDirection: parsed.sortDirection ?? DEFAULT_SORT_DIRECTION,
+    sortField,
+    sortDirection,
   };
 }

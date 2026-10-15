@@ -1,25 +1,43 @@
 /**
- * Offset pagination envelope.
+ * Keyset (cursor) pagination envelope.
  *
- * Offset (page/limit) is used rather than cursor pagination because the list is
- * re-sorted on demand by arbitrary columns; combined with the mandatory `id`
- * tie-breaker it stays free of duplicates and gaps, and it keeps the client's
- * "load next page" logic trivial.
+ * The client never asks for "page N". It sends back the opaque `nextCursor`
+ * from the previous response, which encodes the last row it received, and the
+ * server returns the rows that sort *after* that row. Two consequences:
+ *
+ *  - every page costs the same: the database seeks to the position through
+ *    the sort index instead of reading and discarding OFFSET rows;
+ *  - rows inserted or deleted while the user scrolls cannot shift the window,
+ *    so nothing is shown twice and nothing is skipped.
+ *
+ * The price is that there is no random access: "jump to page 40" cannot be
+ * expressed. Infinite scroll never needs it.
  */
 
 export interface PaginationMeta {
-  /** 1-based page index that produced this payload. */
-  page: number;
   /** Page size that produced this payload. */
   limit: number;
   /** Total rows matching the current search + filters (not the whole table). */
   total: number;
-  /** Total number of pages for `total`/`limit`. */
-  totalPages: number;
-  /** Convenience flag so the client does not have to derive it. */
+  /** Convenience flag; always equal to `nextCursor !== null`. */
   hasMore: boolean;
+  /**
+   * Pass back as `?cursor=` to get the next page; `null` on the last page.
+   * Opaque: clients must not parse or build it.
+   */
+  nextCursor: string | null;
 }
 
-export const DEFAULT_PAGE = 1;
+/**
+ * A position in an ordered result: the sort value and `id` of the last row
+ * already returned. "Next page" means rows strictly after this one in
+ * `ORDER BY <sortField> <direction>, id ASC`.
+ */
+export interface KeysetPosition {
+  /** The row's value for the active sort field (a number for `age`). */
+  value: string | number;
+  id: number;
+}
+
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 100;

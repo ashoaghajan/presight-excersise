@@ -16,6 +16,7 @@ import {
   createTestContext,
   expectedOrder,
   expectedUsers,
+  nocase,
   query,
   walkIds,
   type TestContext,
@@ -222,6 +223,70 @@ describe('pagination while the data changes', () => {
       );
 
       expect(ids).toEqual(original);
+    } finally {
+      c.close();
+    }
+  });
+
+  it('keeps a full-text search walk exact while matching rows are written', () => {
+    // Cursor + FTS5 + triggers together: the search runs through the trigram
+    // index (3+ characters), the order is DESC, and mid-scroll writes reach
+    // the index only through the triggers from migration 002.
+    const c = createTestContext();
+    try {
+      // The most common 3-letter substring, so the search spans many pages.
+      const frequency = new Map<string, number>();
+      for (const user of c.oracle) {
+        const name = nocase(user.first_name);
+        for (const tri of new Set(
+          Array.from({ length: name.length - 2 }, (_, i) => name.slice(i, i + 3)),
+        )) {
+          if (!tri.includes(' ')) frequency.set(tri, (frequency.get(tri) ?? 0) + 1);
+        }
+      }
+      const term = [...frequency].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0]![0];
+      const matches = expectedOrder(expectedUsers(c.oracle, { search: term }), 'last_name', 'desc');
+      expect(matches.length).toBeGreaterThan(10);
+
+      // An unseen match whose last name does not contain the term, so
+      // renaming its first name makes it stop matching.
+      const renamed = matches
+        .slice(-5)
+        .find((user) => !nocase(user.last_name).includes(nocase(term)))!;
+      expect(renamed).toBeDefined();
+
+      const insert = (firstName: string, lastName: string): number =>
+        Number(
+          c.db
+            .prepare(
+              `INSERT INTO users (avatar, first_name, last_name, age, nationality)
+               VALUES ('a.svg', ?, ?, 30, 'Testland')`,
+            )
+            .run(firstName, lastName).lastInsertRowid,
+        );
+
+      let beforeCursor = 0;
+      let afterCursor = 0;
+
+      const ids = walkIds(
+        c.userRepository,
+        { search: term, sortField: 'last_name', sortDirection: 'desc' },
+        5,
+        (pageIndex) => {
+          if (pageIndex !== 2) return;
+          // DESC by last name: "Zzzz" sorts before the cursor, "Aaaa" after.
+          beforeCursor = insert(`Q${term}q`, 'Zzzz');
+          afterCursor = insert(`Q${term}q`, 'Aaaa');
+          c.db.prepare(`UPDATE users SET first_name = 'Qqqq' WHERE id = ?`).run(renamed.id);
+        },
+      );
+
+      expect(new Set(ids).size, 'duplicates').toBe(ids.length);
+      expect(ids).toEqual([
+        ...matches.filter((user) => user.id !== renamed.id).map((user) => user.id),
+        afterCursor,
+      ]);
+      expect(ids).not.toContain(beforeCursor);
     } finally {
       c.close();
     }

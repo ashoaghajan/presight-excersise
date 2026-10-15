@@ -48,9 +48,11 @@ export interface UseUsersInfiniteQueryResult {
 export function useUsersInfiniteQuery(state: UsersQueryState): UseUsersInfiniteQueryResult {
   const query = useInfiniteQuery<UsersResponse, ApiError>({
     queryKey: usersKeys.list(state),
+    // The page param is the server's opaque cursor. The client never builds
+    // or parses one; it only hands back what the previous page returned.
     queryFn: ({ pageParam, signal }) =>
-      getUsers({ ...state, page: pageParam as number, limit: USERS_PAGE_SIZE }, signal),
-    initialPageParam: 1,
+      getUsers({ ...state, cursor: pageParam as string | null, limit: USERS_PAGE_SIZE }, signal),
+    initialPageParam: null as string | null,
     /**
      * Declared here as well as in the query client's defaults, so the behaviour
      * is unambiguous at the point it matters.
@@ -59,11 +61,10 @@ export function useUsersInfiniteQuery(state: UsersQueryState): UseUsersInfiniteQ
      * report a real error. See the longer note in `app/providers/query-client`.
      */
     networkMode: 'always',
-    // The server's `hasMore` is authoritative — it is derived from the total
-    // rather than from "was the page full", so trusting it means never
-    // fetching a trailing empty page just to discover the end.
-    getNextPageParam: (lastPage) =>
-      lastPage.pagination.hasMore ? lastPage.pagination.page + 1 : undefined,
+    // `undefined` tells React Query there is no next page. The server only
+    // issues a cursor when it has seen a row beyond this page, so the list
+    // never fetches a trailing empty page just to discover the end.
+    getNextPageParam: (lastPage) => lastPage.pagination.nextCursor ?? undefined,
   });
 
   const pages = query.data?.pages;

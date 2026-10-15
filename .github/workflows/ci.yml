@@ -15,14 +15,16 @@ permissions:
 jobs:
   verify:
     name: Lint, typecheck, test
-    runs-on: ubuntu-latest
+    # Pinned rather than `ubuntu-latest`: the label moves to a new OS on
+    # GitHub's schedule, not ours. Upgrade the runner image in its own PR.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: yarn
@@ -49,7 +51,7 @@ jobs:
         # Upload even when tests or thresholds fail — that is exactly when the
         # report is needed. Skipped only if the run was cancelled.
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage
           path: |
@@ -60,11 +62,11 @@ jobs:
   docker:
     name: Docker build
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build images
         run: docker compose build

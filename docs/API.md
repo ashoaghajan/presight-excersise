@@ -20,7 +20,7 @@ client bug and is reported as one rather than silently rewritten.
 
 | Parameter       | Type     | Default      | Accepted                                        |
 | --------------- | -------- | ------------ | ----------------------------------------------- |
-| `page`          | integer  | `1`          | 1 … 1000000                                     |
+| `cursor`        | string   | none         | a `nextCursor` from a previous response         |
 | `limit`         | integer  | `50`         | 1 … 100                                         |
 | `search`        | string   | `""`         | ≤ 100 characters                                |
 | `nationalities` | string[] | `[]`         | ≤ 50 values                                     |
@@ -29,7 +29,22 @@ client bug and is reported as one rather than silently rewritten.
 | `sortDirection` | enum     | `asc`        | `asc`, `desc`                                   |
 
 Unknown query keys are ignored, so cache-busting and analytics parameters do not
-fail a request.
+fail a request. The one exception is `page`, the parameter used before cursor
+pagination: it is rejected with `400` so that an outdated client fails visibly
+instead of receiving the first page over and over.
+
+#### Cursor
+
+Omit `cursor` for the first page. For each next page, send back the
+`pagination.nextCursor` from the previous response together with the **same**
+`sortField`, `sortDirection` and filters.
+
+The cursor is **opaque**: clients must not parse or build it. (Internally it is
+base64url-encoded JSON holding the sort field, direction, and the sort value and
+`id` of the last row returned; the format is versioned and may change.) A cursor
+that does not decode, or that was issued for a different `sortField` /
+`sortDirection`, is a `400` with `details.cursor`. Restart from the first page
+when the sort changes.
 
 #### Array parameters
 
@@ -77,11 +92,10 @@ literally, not as syntax. Terms of 3+ characters are served by a full-text index
     },
   ],
   "pagination": {
-    "page": 1, // echoes the page that produced this payload
     "limit": 50, // echoes the effective page size
     "total": 1200, // rows matching the filters — NOT the table size
-    "totalPages": 24, // ceil(total / limit); 0 when total is 0
     "hasMore": true, // true when another page exists after this one
+    "nextCursor": "eyJ2IjoxLCJmIjoiZmlyc3RfbmFtZSIs…", // null on the last page
   },
   "hobbies": [{ "value": "Reading", "count": 320 }], // top 20 facets
   "nationalities": [{ "value": "India", "count": 178 }], // top 20 facets
@@ -111,12 +125,20 @@ Notes on the two facet arrays:
 
 Pagination behaviour worth relying on:
 
-- `hasMore` is derived from `total`, not from "did we get a full page", so a page
-  landing exactly on the last row reports `false` instead of making the client
-  fetch one empty page to find out.
-- A `page` past the end returns `users: []` with `hasMore: false` — not a `404`.
-- Ordering always ends with `id ASC` as a tie-breaker, so paging through a sorted
-  list never duplicates or skips a user.
+- **Keyset, not offset.** `cursor` means "rows after the last row I received",
+  so rows inserted or deleted while a client scrolls cannot cause a duplicate or
+  a skipped user, and every page costs the same however deep it is.
+- **No random access.** There is no "jump to page N" and no `totalPages`; the
+  only way forward is the cursor. `total` is still returned for the result
+  count.
+- `hasMore` is exact: the server reads one row beyond the page to decide it, so
+  an exactly full last page reports `false` instead of making the client fetch
+  one empty page to find out. `hasMore` is always `nextCursor !== null`.
+- `total` is computed by a separate query, so if data changes mid-scroll it
+  describes the set at the time of _that_ request.
+- Ordering always ends with `id ASC` as a tie-breaker. That makes every
+  `(sort value, id)` pair unique, which is what lets a cursor name an exact
+  position.
 
 ### Errors — `ApiErrorBody`
 
@@ -150,9 +172,9 @@ policy), and a `429` also carries `Retry-After` (seconds).
 All failing parameters are reported at once:
 
 ```bash
-$ curl '/api/users?page=abc&limit=999&sortField=nope'
+$ curl '/api/users?cursor=abc!&limit=999&sortField=nope'
 {"error":{"code":"BAD_REQUEST","message":"Invalid query parameters","details":{
-  "page":["must be a whole number"],
+  "cursor":["is not a valid cursor"],
   "limit":["must be between 1 and 100"],
   "sortField":["must be one of: first_name, last_name, age, nationality"]}}}
 ```
@@ -172,8 +194,11 @@ Liveness probe used by the Docker healthcheck.
 ## Examples
 
 ```bash
-# defaults: page 1, 50 per page, sorted by first_name asc
+# defaults: first page, 50 per page, sorted by first_name asc
 curl 'http://localhost:4000/api/users'
+
+# next page: pass back pagination.nextCursor with the same sort and filters
+curl "http://localhost:4000/api/users?cursor=$NEXT_CURSOR"
 
 # search, both filters, sorted oldest first
 curl 'http://localhost:4000/api/users?search=a&nationalities=India&nationalities=Pakistan&hobbies=Reading&sortField=age&sortDirection=desc'
